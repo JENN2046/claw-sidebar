@@ -1,13 +1,13 @@
 {
   "name": "claw-sidebar",
   "displayName": "Claw Sidebar",
-  "description": "Claude Code-style VS Code sidebar for local Claw + CC switch workflows.",
-  "version": "0.1.1",
+  "description": "Claude Code-style VS Code sidebar for local Claw with CC switch, direct API, role-based model mapping, and VCP Agent memory.",
+  "version": "0.1.5",
   "publisher": "local",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ultraworkers/claw-code.git"
+    "url": "https://github.com/JENN2046/claw-sidebar.git"
   },
   "files": [
     "extension.js",
@@ -27,7 +27,13 @@
     "claude",
     "chat",
     "sidebar",
-    "cc-switch"
+    "cc-switch",
+    "openai",
+    "anthropic",
+    "xai",
+    "api",
+    "vcp",
+    "memory"
   ],
   "activationEvents": [
     "onView:clawSidebar.view",

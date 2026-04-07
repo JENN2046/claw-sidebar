@@ -8,12 +8,18 @@ This extension provides a Claude Code-like sidebar chat workflow for local `claw
 
 - chat UI in Activity Bar (`Claw`)
 - one-shot prompt execution via `rust/run-with-cc-switch.ps1`
+- two connection modes:
+  - `CC switch` for reusing your current Claude provider
+  - `Direct API` for entering provider, API key, and optional base URL directly in the sidebar
+- `VCP Agent Memory` mode for binding the sidebar to a VCP Agent + Topic
 - stop running request
 - utility actions: `doctor`, `status`, `REPL`
 - one-click file preview from the workspace (`View File`)
 - one-click `Quick Start` (auto-check + auto-build if needed + doctor/status)
 - optional active editor context injection
-- model / max output token controls
+- role-based model mapping / max output token controls
+- provider / base URL / API key controls in the sidebar
+- VCP Agent / Topic binding so memory is stored in `VCPChat/AppData/UserData/.../history.json`
 - markdown-style assistant rendering (including code blocks)
 - lightweight syntax highlighting for code blocks
 - one-click copy button on code blocks
@@ -21,13 +27,69 @@ This extension provides a Claude Code-like sidebar chat workflow for local `claw
 - chat session persistence across sidebar reloads
 - one-click "Ask Selection" from editor selected code
 
-## Prerequisites
+## Connection modes
+
+### CC switch
 
 - Workspace root opened in VS Code: `a:\VCP\claw-code`
 - Built binary exists: `rust/target/debug/claw.exe`
 - Runner script exists: `rust/run-with-cc-switch.ps1`
 - CC switch config exists: `%USERPROFILE%\.cc-switch`
 - Node.js installed
+
+### Direct API
+
+- Workspace root opened in VS Code: `a:\VCP\claw-code`
+- Built binary exists: `rust/target/debug/claw.exe`
+- Runner script exists: `rust/run-with-cc-switch.ps1`
+- API key for the provider you want to use
+- Optional custom base URL for OpenAI-compatible gateways or self-hosted endpoints
+
+Supported direct providers:
+
+- `Anthropic`
+- `OpenAI / OpenAI-compatible`
+- `xAI`
+
+### VCP Agent Memory
+
+- `VCPChat` exists beside your workspace, for example:
+  - `a:\VCP\VCPChat`
+- `VCPChat/AppData/settings.json` contains:
+  - `vcpServerUrl`
+  - `vcpApiKey`
+- You have created at least one Agent in VCP
+- In the sidebar, switch connection mode to `VCP Agent Memory`
+- Pick the Agent and Topic you want to bind
+
+When this mode is active:
+
+- the sidebar sends requests through the VCP server
+- the selected Agent config provides the model + active system prompt
+- the selected Topic stores user / assistant history
+- future VCP memory upgrades can be inherited by this binding path more naturally than a separate local-only memory layer
+
+## Role-based model mapping
+
+The sidebar now supports Claude Code-style role mapping:
+
+- `Auto`
+- `Main`
+- `Thinking`
+- `Explore`
+- `Plan`
+- `Verify`
+- `Fast`
+- optional `Custom` one-off override
+
+You can keep a different model name for each role, then choose `Auto` or a specific role before sending a message.
+`Auto` uses lightweight prompt heuristics to route the turn to a role, which is a practical first step toward Claude Code-like orchestration.
+
+This works well for gateways where the same provider uses non-Claude model names, such as:
+
+- `moonshotai/kimi-k2.5`
+- `NV_qwen/qwen3.5-397b-a17b`
+- `google/gemma-4-31b-it`
 
 ## Cross-machine notes
 
@@ -41,9 +103,13 @@ For a fresh machine, the practical setup is:
 
 1. clone the repo
 2. install Rust
-3. install Node.js 22+
-4. install and configure CC switch
-5. open the repo and run `Quick Start`
+3. choose one of:
+4. install Node.js 22+ and configure CC switch
+5. or prepare a provider API key for direct API mode
+6. open the repo and run `Quick Start`
+
+If you choose `Direct API`, the API key is stored in VS Code Secret Storage, not plain workspace state.
+In this mode, sidebar chat works directly against the provider API. `REPL` still stays on the local Claw runtime / CC switch path.
 
 ## Run (Development Host)
 

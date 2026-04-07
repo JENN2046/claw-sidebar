@@ -1,10 +1,27 @@
 const vscode = require("vscode");
+const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
 const SESSIONS_KEY = "clawSidebar.sessions";
 const ACTIVE_SESSION_KEY = "clawSidebar.activeSessionId";
 const SESSION_LIMIT = 40;
+const PREF_KEYS = {
+  model: "clawSidebar.model",
+  modelSlot: "clawSidebar.modelSlot",
+  modelMappings: "clawSidebar.modelMappings",
+  maxTokens: "clawSidebar.maxTokens",
+  includeEditorContext: "clawSidebar.includeEditorContext",
+  connectionMode: "clawSidebar.connectionMode",
+  provider: "clawSidebar.provider",
+  baseUrl: "clawSidebar.baseUrl",
+  vcpAgentId: "clawSidebar.vcpAgentId",
+  vcpTopicId: "clawSidebar.vcpTopicId"
+};
+const SECRET_KEYS = {
+  apiKey: "clawSidebar.apiKey"
+};
+const MODEL_SLOTS = ["main", "thinking", "explore", "plan", "verify", "fast"];
 
 function activate(context) {
   const provider = new ClawSidebarProvider(context);
@@ -97,6 +114,15 @@ class ClawSidebarProvider {
           case "savePrefs":
             await this.savePrefs(message.payload || {});
             break;
+          case "refreshVcpState":
+            await this.refreshVcpState(message.payload || {});
+            break;
+          case "createVcpTopic":
+            await this.createVcpTopic(message.payload || {});
+            break;
+          case "clearApiKey":
+            await this.clearApiKey();
+            break;
           case "saveSession":
             await this.saveSession(message.payload || {});
             break;
@@ -122,10 +148,10 @@ class ClawSidebarProvider {
             await this.runUtility("status");
             break;
           case "openRepl":
-            await this.openRepl();
+            await this.openRepl(message.payload || {});
             break;
           case "quickStart":
-            await this.quickStart();
+            await this.quickStart(message.payload || {});
             break;
           case "viewFile":
             await this.viewFile();
@@ -145,13 +171,29 @@ class ClawSidebarProvider {
     const store = this.loadSessionStore();
     await this.persistSessionStore(store);
     const active = getActiveSession(store);
+    const prefs = await this.readConnectionPrefs();
+    const modelPrefs = this.readModelPrefs();
+    const workspaceRoot = getWorkspaceRoot();
+    const vcpState = await this.getVcpState(workspaceRoot, prefs);
+    const initialMessages = prefs.connectionMode === "vcp-agent" && Array.isArray(vcpState.history)
+      ? vcpState.history
+      : active.messages;
     this.post("init", {
-      model: this.context.workspaceState.get("clawSidebar.model", ""),
-      maxTokens: this.context.workspaceState.get("clawSidebar.maxTokens", 1024),
-      includeEditorContext: this.context.workspaceState.get("clawSidebar.includeEditorContext", true),
+      model: modelPrefs.model,
+      modelSlot: modelPrefs.modelSlot,
+      modelMappings: modelPrefs.modelMappings,
+      maxTokens: this.context.workspaceState.get(PREF_KEYS.maxTokens, 1024),
+      includeEditorContext: this.context.workspaceState.get(PREF_KEYS.includeEditorContext, true),
+      connectionMode: prefs.connectionMode,
+      provider: prefs.provider,
+      baseUrl: prefs.baseUrl,
+      hasApiKey: prefs.hasApiKey,
+      vcpAgentId: prefs.vcpAgentId,
+      vcpTopicId: prefs.vcpTopicId,
+      vcpState,
       sessions: toSessionMetaList(store.sessions),
       activeSessionId: active.id,
-      session: active.messages
+      session: initialMessages
     });
     if (this.pendingClientActions.length > 0) {
       for (const pending of this.pendingClientActions) {
@@ -163,17 +205,85 @@ class ClawSidebarProvider {
 
   async savePrefs(payload) {
     if (Object.prototype.hasOwnProperty.call(payload, "model")) {
-      await this.context.workspaceState.update("clawSidebar.model", String(payload.model || ""));
+      await this.context.workspaceState.update(PREF_KEYS.model, String(payload.model || ""));
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "modelSlot")) {
+      await this.context.workspaceState.update(PREF_KEYS.modelSlot, normalizeModelSlot(payload.modelSlot));
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "modelMappings")) {
+      await this.context.workspaceState.update(PREF_KEYS.modelMappings, sanitizeModelMappings(payload.modelMappings));
     }
     if (Object.prototype.hasOwnProperty.call(payload, "maxTokens")) {
       const parsed = Number(payload.maxTokens);
       if (Number.isFinite(parsed) && parsed > 0) {
-        await this.context.workspaceState.update("clawSidebar.maxTokens", Math.floor(parsed));
+        await this.context.workspaceState.update(PREF_KEYS.maxTokens, Math.floor(parsed));
       }
     }
     if (Object.prototype.hasOwnProperty.call(payload, "includeEditorContext")) {
-      await this.context.workspaceState.update("clawSidebar.includeEditorContext", Boolean(payload.includeEditorContext));
+      await this.context.workspaceState.update(PREF_KEYS.includeEditorContext, Boolean(payload.includeEditorContext));
     }
+    if (Object.prototype.hasOwnProperty.call(payload, "connectionMode")) {
+      await this.context.workspaceState.update(
+        PREF_KEYS.connectionMode,
+        normalizeConnectionMode(payload.connectionMode)
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "provider")) {
+      await this.context.workspaceState.update(
+        PREF_KEYS.provider,
+        normalizeProvider(payload.provider)
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "baseUrl")) {
+      await this.context.workspaceState.update(PREF_KEYS.baseUrl, String(payload.baseUrl || "").trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "vcpAgentId")) {
+      await this.context.workspaceState.update(PREF_KEYS.vcpAgentId, String(payload.vcpAgentId || "").trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "vcpTopicId")) {
+      await this.context.workspaceState.update(PREF_KEYS.vcpTopicId, String(payload.vcpTopicId || "").trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "apiKey")) {
+      const apiKey = String(payload.apiKey || "").trim();
+      if (apiKey) {
+        await this.context.secrets.store(SECRET_KEYS.apiKey, apiKey);
+      }
+    }
+    const workspaceRoot = getWorkspaceRoot();
+    this.post("prefsState", {
+      ...(await this.readConnectionPrefs()),
+      ...this.readModelPrefs(),
+      vcpState: await this.getVcpState(workspaceRoot, await this.readConnectionPrefs())
+    });
+  }
+
+  async clearApiKey() {
+    await this.context.secrets.delete(SECRET_KEYS.apiKey);
+    this.post("prefsState", {
+      ...(await this.readConnectionPrefs()),
+      ...this.readModelPrefs()
+    });
+  }
+
+  async readConnectionPrefs() {
+    const apiKey = await this.context.secrets.get(SECRET_KEYS.apiKey);
+    return {
+      connectionMode: normalizeConnectionMode(this.context.workspaceState.get(PREF_KEYS.connectionMode, "cc-switch")),
+      provider: normalizeProvider(this.context.workspaceState.get(PREF_KEYS.provider, "anthropic")),
+      baseUrl: String(this.context.workspaceState.get(PREF_KEYS.baseUrl, "") || "").trim(),
+      vcpAgentId: String(this.context.workspaceState.get(PREF_KEYS.vcpAgentId, "") || "").trim(),
+      vcpTopicId: String(this.context.workspaceState.get(PREF_KEYS.vcpTopicId, "") || "").trim(),
+      apiKey: apiKey || "",
+      hasApiKey: Boolean(apiKey)
+    };
+  }
+
+  readModelPrefs() {
+    return {
+      model: String(this.context.workspaceState.get(PREF_KEYS.model, "") || "").trim(),
+      modelSlot: normalizeModelSlot(this.context.workspaceState.get(PREF_KEYS.modelSlot, "auto")),
+      modelMappings: sanitizeModelMappings(this.context.workspaceState.get(PREF_KEYS.modelMappings, {}))
+    };
   }
 
   async saveSession(payload) {
@@ -272,10 +382,6 @@ class ClawSidebarProvider {
     if (!workspaceRoot) {
       throw new Error("Open the claw-code workspace first.");
     }
-    const scriptPath = path.join(workspaceRoot, "rust", "run-with-cc-switch.ps1");
-    if (!pathExists(scriptPath)) {
-      throw new Error(`Missing script: ${scriptPath}`);
-    }
     if (this.activeRun) {
       throw new Error("A request is already running. Stop it first.");
     }
@@ -288,9 +394,35 @@ class ClawSidebarProvider {
 
     const includeEditorContext = Boolean(message.includeEditorContext);
     const editorContext = includeEditorContext ? buildEditorContext(workspaceRoot) : "";
-    const composedPrompt = buildComposedPrompt(history, input, editorContext);
-    const model = String(message.model || "").trim();
     const maxTokens = clampPositiveInteger(message.maxTokens, 1024, 128, 8192);
+    const connectionPrefs = await this.resolveConnectionPrefs(message);
+    if (connectionPrefs.connectionMode === "vcp-agent") {
+      await this.runVcpAgentTurn({
+        workspaceRoot,
+        history,
+        input,
+        editorContext,
+        includeEditorContext,
+        connectionPrefs
+      });
+      return;
+    }
+    const composedPrompt = buildComposedPrompt(history, input, editorContext);
+    const modelPrefs = resolveModelPrefsPayload(message, connectionPrefs.provider);
+    const resolvedRole = resolveEffectiveRole(modelPrefs.modelSlot, input, editorContext);
+    const model = resolveRequestedModel({ ...modelPrefs, modelSlot: resolvedRole }, connectionPrefs.provider);
+    if (connectionPrefs.connectionMode === "manual") {
+      await this.runDirectApiTurn(composedPrompt, model, maxTokens, connectionPrefs, {
+        ...modelPrefs,
+        resolvedRole
+      });
+      return;
+    }
+
+    const scriptPath = path.join(workspaceRoot, "rust", "run-with-cc-switch.ps1");
+    if (!pathExists(scriptPath)) {
+      throw new Error(`Missing script: ${scriptPath}`);
+    }
     const args = [
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
       "-Prompt", composedPrompt, "-MaxOutputTokens", String(maxTokens)
@@ -298,6 +430,7 @@ class ClawSidebarProvider {
     if (model) {
       args.push("-Model", model);
     }
+    appendRunnerConnectionArgs(args, connectionPrefs);
 
     const child = spawn("powershell.exe", args, {
       cwd: workspaceRoot,
@@ -306,7 +439,14 @@ class ClawSidebarProvider {
     });
     const run = { child, cancelled: false, finished: false };
     this.activeRun = run;
-    this.post("runStart", { model: model || "(cc-switch default)", maxTokens });
+    this.post("runStart", {
+      model: model || "(default)",
+      maxTokens,
+      connectionMode: connectionPrefs.connectionMode,
+      provider: connectionPrefs.provider,
+      modelSlot: modelPrefs.modelSlot,
+      resolvedRole
+    });
 
     let stdout = "";
     let stderr = "";
@@ -342,20 +482,67 @@ class ClawSidebarProvider {
     });
   }
 
-  async quickStart() {
+  async quickStart(payload = {}) {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {
       throw new Error("Open the claw-code workspace first.");
     }
     const rustDir = path.join(workspaceRoot, "rust");
     const scriptPath = path.join(rustDir, "run-with-cc-switch.ps1");
-    if (!pathExists(scriptPath)) {
-      throw new Error(`Missing script: ${scriptPath}`);
-    }
 
     const logs = [];
     logs.push("Quick Start: checking workspace...");
     logs.push(`Workspace: ${workspaceRoot}`);
+    const connectionPrefs = await this.resolveConnectionPrefs(payload);
+    if (connectionPrefs.connectionMode === "vcp-agent") {
+      const vcpState = await this.getVcpState(workspaceRoot, connectionPrefs);
+      if (!vcpState.available) {
+        throw new Error(vcpState.error || "VCPChat was not found.");
+      }
+      logs.push("VCP Agent mode enabled.");
+      logs.push(`VCP root: ${vcpState.vcpRoot}`);
+      logs.push(`VCP server: ${vcpState.vcpUrl || "(missing)"}`);
+      logs.push(`VCP API key: ${vcpState.hasApiKey ? "present" : "missing"}`);
+      logs.push(`Agent: ${vcpState.selectedAgentName || vcpState.selectedAgentId || "(none)"}`);
+      logs.push(`Topic: ${vcpState.selectedTopicName || vcpState.selectedTopicId || "(none)"}`);
+      if (vcpState.agentModel) {
+        logs.push(`Agent model: ${vcpState.agentModel}`);
+      }
+      this.post("utilityResult", {
+        command: "quick-start",
+        code: vcpState.hasApiKey && vcpState.vcpUrl && vcpState.selectedAgentId ? 0 : 1,
+        stdout: logs.join("\n"),
+        stderr: vcpState.warning || ""
+      });
+      return;
+    }
+    const modelPrefs = resolveModelPrefsPayload(payload, connectionPrefs.provider);
+    const resolvedRole = modelPrefs.modelSlot === "auto" ? "main" : modelPrefs.modelSlot;
+    const model = resolveRequestedModel({ ...modelPrefs, modelSlot: resolvedRole }, connectionPrefs.provider);
+    logs.push(`Connection: ${describeConnection(connectionPrefs)}`);
+    logs.push(`Role: ${modelPrefs.modelSlot}`);
+    if (modelPrefs.modelSlot === "auto") {
+      logs.push(`Auto fallback role preview: ${resolvedRole}`);
+    }
+    logs.push(`Resolved model: ${model}`);
+
+    if (connectionPrefs.connectionMode === "manual") {
+      logs.push("Direct API mode does not require CC switch.");
+      logs.push("API key: present");
+      logs.push(`Provider: ${connectionPrefs.provider}`);
+      logs.push(`Base URL: ${connectionPrefs.baseUrl || "(provider default)"}`);
+      this.post("utilityResult", {
+        command: "quick-start",
+        code: 0,
+        stdout: logs.join("\n"),
+        stderr: ""
+      });
+      return;
+    }
+
+    if (!pathExists(scriptPath)) {
+      throw new Error(`Missing script: ${scriptPath}`);
+    }
     logs.push(`Runner: ${scriptPath}`);
 
     const clawExe = path.join(rustDir, "target", "debug", "claw.exe");
@@ -426,22 +613,228 @@ class ClawSidebarProvider {
     this.post("utilityResult", { command, ...result });
   }
 
-  async openRepl() {
+  async openRepl(payload = {}) {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {
       throw new Error("Open the claw-code workspace first.");
+    }
+    const connectionPrefs = await this.resolveConnectionPrefs(payload);
+    if (connectionPrefs.connectionMode === "manual" || connectionPrefs.connectionMode === "vcp-agent") {
+      throw new Error("REPL currently works only with the local Claw runtime / CC switch mode.");
     }
     const scriptPath = path.join(workspaceRoot, "rust", "run-with-cc-switch.ps1");
     if (!pathExists(scriptPath)) {
       throw new Error(`Missing script: ${scriptPath}`);
     }
+    const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Repl"];
+    appendRunnerConnectionArgs(args, connectionPrefs);
     const terminal = vscode.window.createTerminal({
-      name: "Claw REPL (CC switch)",
+      name: `Claw REPL (${describeConnection(connectionPrefs)})`,
       cwd: workspaceRoot
     });
     terminal.show(true);
-    terminal.sendText(`powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -Repl`, true);
+    terminal.sendText(`powershell ${args.map(quotePowerShellArg).join(" ")}`, true);
     this.post("utilityResult", { command: "repl", code: 0, stdout: "Opened Claw REPL in integrated terminal.", stderr: "" });
+  }
+
+  async resolveConnectionPrefs(payload = {}) {
+    const stored = await this.readConnectionPrefs();
+    const connectionMode = normalizeConnectionMode(
+      Object.prototype.hasOwnProperty.call(payload, "connectionMode") ? payload.connectionMode : stored.connectionMode
+    );
+    const provider = normalizeProvider(
+      Object.prototype.hasOwnProperty.call(payload, "provider") ? payload.provider : stored.provider
+    );
+    const baseUrl = String(
+      Object.prototype.hasOwnProperty.call(payload, "baseUrl") ? payload.baseUrl : stored.baseUrl
+    ).trim();
+    const apiKey = String(
+      Object.prototype.hasOwnProperty.call(payload, "apiKey") && String(payload.apiKey || "").trim()
+        ? payload.apiKey
+        : stored.apiKey
+    ).trim();
+    if (connectionMode !== "cc-switch" && !apiKey) {
+      if (connectionMode === "manual") {
+        throw new Error("Manual API mode requires an API Key. Enter one in the sidebar first.");
+      }
+    }
+    return {
+      connectionMode,
+      provider,
+      baseUrl,
+      vcpAgentId: String(payload.vcpAgentId || stored.vcpAgentId || "").trim(),
+      vcpTopicId: String(payload.vcpTopicId || stored.vcpTopicId || "").trim(),
+      apiKey,
+      hasApiKey: Boolean(apiKey)
+    };
+  }
+
+  async refreshVcpState(payload = {}) {
+    const workspaceRoot = getWorkspaceRoot();
+    const prefs = await this.resolveConnectionPrefs(payload);
+    const vcpState = await this.getVcpState(workspaceRoot, prefs);
+    this.post("vcpState", vcpState);
+    if (prefs.connectionMode === "vcp-agent" && Array.isArray(vcpState.history)) {
+      this.post("vcpHistoryLoaded", {
+        session: vcpState.history,
+        topicId: vcpState.selectedTopicId,
+        topicName: vcpState.selectedTopicName || vcpState.selectedTopicId
+      });
+    }
+  }
+
+  async createVcpTopic(payload = {}) {
+    const workspaceRoot = getWorkspaceRoot();
+    const prefs = await this.resolveConnectionPrefs(payload);
+    const env = getVcpEnvironment(workspaceRoot);
+    const topic = await createVcpTopic(env, prefs.vcpAgentId, String(payload.topicName || "").trim());
+    await this.context.workspaceState.update(PREF_KEYS.vcpTopicId, topic.id);
+    const nextPrefs = { ...prefs, vcpTopicId: topic.id };
+    const vcpState = await this.getVcpState(workspaceRoot, nextPrefs);
+    this.post("vcpState", vcpState);
+    this.post("vcpHistoryLoaded", {
+      session: [],
+      topicId: topic.id,
+      topicName: topic.name
+    });
+  }
+
+  async getVcpState(workspaceRoot, prefs) {
+    try {
+      const env = getVcpEnvironment(workspaceRoot);
+      const state = loadVcpSidebarState(env, prefs);
+      return state;
+    } catch (error) {
+      return {
+        available: false,
+        error: error instanceof Error ? error.message : String(error),
+        agents: [],
+        topics: [],
+        history: []
+      };
+    }
+  }
+
+  async runVcpAgentTurn({ workspaceRoot, input, editorContext, connectionPrefs }) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const run = {
+      cancelled: false,
+      finished: false,
+      cancel: () => {
+        if (controller) {
+          controller.abort();
+        }
+      }
+    };
+    this.activeRun = run;
+
+    try {
+      const env = getVcpEnvironment(workspaceRoot);
+      const state = loadVcpSidebarState(env, connectionPrefs);
+      if (!state.available) {
+        throw new Error(state.error || "VCPChat is unavailable.");
+      }
+      if (!state.selectedAgentId) {
+        throw new Error("Choose a VCP Agent first.");
+      }
+      if (!state.selectedTopicId) {
+        throw new Error("Choose or create a VCP Topic first.");
+      }
+
+      const userContent = composeVcpUserContent(input, editorContext);
+      const history = Array.isArray(state.history) ? [...state.history] : [];
+      const userMessage = createHistoryEntry("user", userContent);
+      history.push(userMessage);
+      saveVcpHistory(env, state.selectedAgentId, state.selectedTopicId, history);
+
+      this.post("runStart", {
+        model: state.agentModel || "(VCP agent default)",
+        maxTokens: state.maxOutputTokens || 0,
+        connectionMode: "vcp-agent",
+        provider: "vcp",
+        modelSlot: "vcp-agent",
+        resolvedRole: "memory"
+      });
+
+      const assistantText = await executeVcpAgentPrompt({
+        state,
+        history,
+        signal: controller ? controller.signal : undefined
+      });
+      if (run.cancelled || run.finished) {
+        return;
+      }
+      run.finished = true;
+      const assistantMessage = createHistoryEntry("assistant", assistantText);
+      history.push(assistantMessage);
+      saveVcpHistory(env, state.selectedAgentId, state.selectedTopicId, history);
+      this.post("runChunk", { text: assistantText });
+      this.post("runEnd", { code: 0, stdout: assistantText, stderr: "" });
+      this.post("vcpState", loadVcpSidebarState(env, connectionPrefs));
+    } catch (error) {
+      if (run.cancelled || run.finished) {
+        return;
+      }
+      run.finished = true;
+      const message = error instanceof Error ? error.message : String(error);
+      this.post("runEnd", { code: 1, stdout: "", stderr: message });
+    } finally {
+      if (this.activeRun === run) {
+        this.activeRun = null;
+      }
+    }
+  }
+
+  async runDirectApiTurn(prompt, model, maxTokens, connectionPrefs, modelPrefs) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const run = {
+      cancelled: false,
+      finished: false,
+      cancel: () => {
+        if (controller) {
+          controller.abort();
+        }
+      }
+    };
+    this.activeRun = run;
+    const activeModel = model || defaultModelForProvider(connectionPrefs.provider);
+    this.post("runStart", {
+      model: activeModel,
+      maxTokens,
+      connectionMode: connectionPrefs.connectionMode,
+      provider: connectionPrefs.provider,
+      modelSlot: modelPrefs.modelSlot,
+      resolvedRole: modelPrefs.resolvedRole || modelPrefs.modelSlot
+    });
+
+    try {
+      const text = await executeDirectApiPrompt({
+        provider: connectionPrefs.provider,
+        apiKey: connectionPrefs.apiKey,
+        baseUrl: connectionPrefs.baseUrl,
+        model: activeModel,
+        maxTokens,
+        prompt,
+        signal: controller ? controller.signal : undefined
+      });
+      if (run.cancelled || run.finished) {
+        return;
+      }
+      run.finished = true;
+      this.post("runChunk", { text });
+      this.post("runEnd", { code: 0, stdout: text, stderr: "" });
+    } catch (error) {
+      if (run.cancelled || run.finished) {
+        return;
+      }
+      run.finished = true;
+      const message = error instanceof Error ? error.message : String(error);
+      this.post("runEnd", { code: 1, stdout: "", stderr: message });
+    } finally {
+      if (this.activeRun === run) {
+        this.activeRun = null;
+      }
+    }
   }
 
   async viewFile() {
@@ -515,7 +908,11 @@ class ClawSidebarProvider {
     }
     try {
       this.activeRun.cancelled = true;
-      this.activeRun.child.kill();
+      if (typeof this.activeRun.cancel === "function") {
+        this.activeRun.cancel();
+      } else if (this.activeRun.child) {
+        this.activeRun.child.kill();
+      }
     } catch (_) {
       // best effort
     }
@@ -556,7 +953,16 @@ function buildWebviewHtml(nonce) {
     .title { font-weight: 700; }
     .session-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; }
     select, input, textarea { width: 100%; background: var(--inputbg); color: var(--inputfg); border: 1px solid var(--inputborder); border-radius: 8px; padding: 6px 8px; font-family: inherit; font-size: 12px; }
-    .controls { display: grid; grid-template-columns: 1fr 88px; gap: 6px; }
+    .controls { display: grid; grid-template-columns: 140px 1fr 88px; gap: 6px; }
+    .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .mapping-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .field { display: grid; gap: 4px; }
+    .field.full { grid-column: 1 / -1; }
+    .field-label { font-size: 11px; color: var(--muted); }
+    .section { border: 1px solid var(--border); border-radius: 10px; padding: 8px; display: grid; gap: 8px; background: color-mix(in srgb, var(--panel) 84%, transparent); }
+    .section-title { font-weight: 600; }
+    .secret-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+    .subtle { color: var(--muted); font-size: 11px; }
     .mini { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
     .mini input { width: 14px; height: 14px; }
     .chat { flex: 1; overflow: auto; padding: 8px; display: grid; gap: 8px; }
@@ -631,8 +1037,86 @@ function buildWebviewHtml(nonce) {
       <button id="sessionDelete" class="secondary" title="Delete session">-</button>
     </div>
     <div class="controls">
-      <input id="model" type="text" placeholder="Model (empty = cc-switch default)" />
+      <select id="modelSlot">
+        <option value="auto">Auto</option>
+        <option value="main">Main</option>
+        <option value="thinking">Thinking</option>
+        <option value="explore">Explore</option>
+        <option value="plan">Plan</option>
+        <option value="verify">Verify</option>
+        <option value="fast">Fast</option>
+        <option value="custom">Custom</option>
+      </select>
+      <input id="model" type="text" placeholder="Custom model override" />
       <input id="maxTokens" type="number" min="128" max="8192" step="128" />
+    </div>
+    <div class="section">
+      <div class="section-title">Role Model Mapping</div>
+      <div class="subtle">Map each orchestration role to a model. Leave a field empty to use the provider-specific default.</div>
+      <div class="mapping-grid">
+        <label class="field">
+          <span class="field-label">Main</span>
+          <input id="mapMain" type="text" placeholder="" />
+        </label>
+        <label class="field">
+          <span class="field-label">Thinking</span>
+          <input id="mapThinking" type="text" placeholder="" />
+        </label>
+        <label class="field">
+          <span class="field-label">Explore</span>
+          <input id="mapExplore" type="text" placeholder="" />
+        </label>
+        <label class="field">
+          <span class="field-label">Plan</span>
+          <input id="mapPlan" type="text" placeholder="" />
+        </label>
+        <label class="field">
+          <span class="field-label">Verify</span>
+          <input id="mapVerify" type="text" placeholder="" />
+        </label>
+        <label class="field">
+          <span class="field-label">Fast</span>
+          <input id="mapFast" type="text" placeholder="" />
+        </label>
+      </div>
+      <div id="modelHint" class="subtle"></div>
+    </div>
+    <div class="duo">
+      <select id="connectionMode">
+        <option value="cc-switch">CC switch</option>
+        <option value="manual">Direct API</option>
+        <option value="vcp-agent">VCP Agent Memory</option>
+      </select>
+      <select id="provider">
+        <option value="anthropic">Anthropic</option>
+        <option value="openai">OpenAI / OpenAI-compatible</option>
+        <option value="xai">xAI</option>
+      </select>
+    </div>
+    <input id="baseUrl" type="text" placeholder="Base URL (optional: leave empty for provider default)" />
+    <div class="secret-row">
+      <input id="apiKey" type="password" placeholder="API Key" />
+      <button id="clearKeyBtn" class="secondary" title="Clear saved API key">Clear Key</button>
+    </div>
+    <div id="connectionHint" class="subtle"></div>
+    <div id="vcpSection" class="section" style="display:none;">
+      <div class="section-title">VCP Memory Binding</div>
+      <div class="subtle">Bind this sidebar to a VCP Agent and Topic so memory lives inside VCPChat.</div>
+      <div class="duo">
+        <label class="field">
+          <span class="field-label">Agent</span>
+          <select id="vcpAgent"></select>
+        </label>
+        <label class="field">
+          <span class="field-label">Topic</span>
+          <select id="vcpTopic"></select>
+        </label>
+      </div>
+      <div class="row">
+        <button id="refreshVcpBtn" class="secondary">Refresh VCP</button>
+        <button id="newTopicBtn" class="secondary">New Topic</button>
+      </div>
+      <div id="vcpHint" class="subtle"></div>
     </div>
     <label class="mini"><input id="includeEditor" type="checkbox" />Include active editor context</label>
   </div>
@@ -667,12 +1151,32 @@ function buildWebviewHtml(nonce) {
       doctor: document.getElementById("doctorBtn"),
       status: document.getElementById("statusBtn"),
       repl: document.getElementById("replBtn"),
+      modelSlot: document.getElementById("modelSlot"),
       model: document.getElementById("model"),
       maxTokens: document.getElementById("maxTokens"),
+      mapMain: document.getElementById("mapMain"),
+      mapThinking: document.getElementById("mapThinking"),
+      mapExplore: document.getElementById("mapExplore"),
+      mapPlan: document.getElementById("mapPlan"),
+      mapVerify: document.getElementById("mapVerify"),
+      mapFast: document.getElementById("mapFast"),
+      modelHint: document.getElementById("modelHint"),
+      connectionMode: document.getElementById("connectionMode"),
+      provider: document.getElementById("provider"),
+      baseUrl: document.getElementById("baseUrl"),
+      apiKey: document.getElementById("apiKey"),
+      clearKey: document.getElementById("clearKeyBtn"),
+      connectionHint: document.getElementById("connectionHint"),
       includeEditor: document.getElementById("includeEditor"),
       sessionSelect: document.getElementById("sessionSelect"),
       sessionNew: document.getElementById("sessionNew"),
-      sessionDelete: document.getElementById("sessionDelete")
+      sessionDelete: document.getElementById("sessionDelete"),
+      vcpSection: document.getElementById("vcpSection"),
+      vcpAgent: document.getElementById("vcpAgent"),
+      vcpTopic: document.getElementById("vcpTopic"),
+      refreshVcp: document.getElementById("refreshVcpBtn"),
+      newTopic: document.getElementById("newTopicBtn"),
+      vcpHint: document.getElementById("vcpHint")
     };
 
     const state = {
@@ -680,8 +1184,11 @@ function buildWebviewHtml(nonce) {
       activeSessionId: "",
       messages: [],
       running: false,
-      assistantMessageIndex: -1
+      assistantMessageIndex: -1,
+      hasApiKey: false,
+      vcpState: { available: false, agents: [], topics: [], history: [] }
     };
+    const MODEL_SLOTS = ["main", "thinking", "explore", "plan", "verify", "fast"];
     let persistTimer = null;
 
     function normalizeMessages(messages) {
@@ -721,9 +1228,27 @@ function buildWebviewHtml(nonce) {
         return "<option value=\\"" + escapeHtml(s.id) + "\\"" + selected + ">" + escapeHtml(s.title || "New Chat") + "</option>";
       }).join("");
       el.sessionSelect.innerHTML = html;
-      el.sessionSelect.disabled = state.running || state.sessions.length === 0;
-      el.sessionNew.disabled = state.running;
-      el.sessionDelete.disabled = state.running || state.sessions.length === 0;
+      const vcpMode = el.connectionMode.value === "vcp-agent";
+      el.sessionSelect.disabled = state.running || state.sessions.length === 0 || vcpMode;
+      el.sessionNew.disabled = state.running || vcpMode;
+      el.sessionDelete.disabled = state.running || state.sessions.length === 0 || vcpMode;
+    }
+
+    function renderVcpOptions() {
+      const agents = Array.isArray(state.vcpState.agents) ? state.vcpState.agents : [];
+      const topics = Array.isArray(state.vcpState.topics) ? state.vcpState.topics : [];
+      el.vcpAgent.innerHTML = agents.length
+        ? agents.map((item) => {
+            const selected = item.id === state.vcpState.selectedAgentId ? " selected" : "";
+            return "<option value=\\"" + escapeHtml(item.id) + "\\"" + selected + ">" + escapeHtml(item.name || item.id) + "</option>";
+          }).join("")
+        : "<option value=\"\">No VCP Agents found</option>";
+      el.vcpTopic.innerHTML = topics.length
+        ? topics.map((item) => {
+            const selected = item.id === state.vcpState.selectedTopicId ? " selected" : "";
+            return "<option value=\\"" + escapeHtml(item.id) + "\\"" + selected + ">" + escapeHtml(item.name || item.id) + "</option>";
+          }).join("")
+        : "<option value=\"\">No Topics found</option>";
     }
 
     function render(scroll = true) {
@@ -758,7 +1283,14 @@ function buildWebviewHtml(nonce) {
       el.doctor.disabled = running;
       el.status.disabled = running;
       el.repl.disabled = running;
+      el.modelSlot.disabled = running;
+      el.model.disabled = running;
+      el.maxTokens.disabled = running;
+      el.connectionMode.disabled = running;
+      el.includeEditor.disabled = running;
       el.stop.disabled = !running;
+      updateConnectionUi();
+      updateModelUi();
       renderSessionSelect();
     }
 
@@ -784,13 +1316,22 @@ function buildWebviewHtml(nonce) {
       state.assistantMessageIndex = state.messages.length;
       addMessage("assistant", "");
       setRunning(true);
+      savePrefs();
       vscode.postMessage({
         type: "ask",
         input,
         history: state.messages.slice(0, -1),
+        modelSlot: el.modelSlot.value,
         model: el.model.value.trim(),
+        modelMappings: getModelMappings(),
         maxTokens: Number(el.maxTokens.value || 1024),
-        includeEditorContext: el.includeEditor.checked
+        includeEditorContext: el.includeEditor.checked,
+        connectionMode: el.connectionMode.value,
+        provider: el.provider.value,
+        baseUrl: el.baseUrl.value.trim(),
+        apiKey: el.apiKey.value.trim(),
+        vcpAgentId: el.vcpAgent.value,
+        vcpTopicId: el.vcpTopic.value
       });
     }
 
@@ -798,11 +1339,132 @@ function buildWebviewHtml(nonce) {
       vscode.postMessage({
         type: "savePrefs",
         payload: {
+          modelSlot: el.modelSlot.value,
           model: el.model.value,
+          modelMappings: getModelMappings(),
           maxTokens: Number(el.maxTokens.value || 1024),
-          includeEditorContext: el.includeEditor.checked
+          includeEditorContext: el.includeEditor.checked,
+          connectionMode: el.connectionMode.value,
+          provider: el.provider.value,
+          baseUrl: el.baseUrl.value.trim(),
+          apiKey: el.apiKey.value.trim(),
+          vcpAgentId: el.vcpAgent.value,
+          vcpTopicId: el.vcpTopic.value
         }
       });
+    }
+
+    function updateConnectionUi() {
+      const manual = el.connectionMode.value === "manual";
+      const vcpMode = el.connectionMode.value === "vcp-agent";
+      el.provider.disabled = state.running || !manual;
+      el.baseUrl.disabled = state.running || !manual;
+      el.apiKey.disabled = state.running || !manual;
+      el.clearKey.disabled = state.running || !manual || !state.hasApiKey;
+      el.vcpSection.style.display = vcpMode ? "grid" : "none";
+      el.vcpAgent.disabled = state.running || !vcpMode || !state.vcpState.available;
+      el.vcpTopic.disabled = state.running || !vcpMode || !state.vcpState.available;
+      el.refreshVcp.disabled = state.running || !vcpMode;
+      el.newTopic.disabled = state.running || !vcpMode || !el.vcpAgent.value;
+      if (vcpMode) {
+        el.connectionHint.textContent = "VCP Agent mode: memory is stored in VCPChat under the selected Agent and Topic.";
+        el.apiKey.placeholder = "VCP uses the key saved in VCPChat";
+        const warning = state.vcpState.warning ? " " + state.vcpState.warning : "";
+        el.vcpHint.textContent =
+          "Root: " + (state.vcpState.vcpRoot || "Not found") +
+          " | Agent: " + (state.vcpState.selectedAgentName || state.vcpState.selectedAgentId || "None") +
+          " | Topic: " + (state.vcpState.selectedTopicName || state.vcpState.selectedTopicId || "None") +
+          warning;
+        renderSessionSelect();
+        return;
+      }
+      if (!manual) {
+        el.connectionHint.textContent = "Using the active Claude provider from CC switch.";
+        el.apiKey.placeholder = "API Key is managed by CC switch";
+        return;
+      }
+      const providerLabel = el.provider.options[el.provider.selectedIndex] ? el.provider.options[el.provider.selectedIndex].text : "provider";
+      el.connectionHint.textContent = "Direct API mode: use a saved key plus an optional custom Base URL for " + providerLabel + ".";
+      el.apiKey.placeholder = state.hasApiKey
+        ? "Saved in VS Code Secret Storage. Enter a new key to replace it."
+        : "Enter API Key";
+    }
+
+    function getDefaultModelForSlot(provider, slot) {
+      if (provider === "openai") {
+        if (slot === "thinking") return "o4-mini";
+        if (slot === "explore") return "gpt-4.1-mini";
+        if (slot === "plan") return "o4-mini";
+        if (slot === "verify") return "gpt-4.1";
+        if (slot === "fast") return "gpt-4.1-nano";
+        return "gpt-4.1-mini";
+      }
+      if (provider === "xai") {
+        if (slot === "thinking") return "grok-3";
+        if (slot === "explore") return "grok-3-mini";
+        if (slot === "plan") return "grok-3";
+        if (slot === "verify") return "grok-3";
+        if (slot === "fast") return "grok-3-mini";
+        return "grok-3-mini";
+      }
+      if (slot === "thinking") return "claude-opus-4-6";
+      if (slot === "fast") return "claude-haiku-4-5-20251213";
+      return "claude-sonnet-4-6";
+    }
+
+    function getModelMappings() {
+      return {
+        main: el.mapMain.value.trim(),
+        thinking: el.mapThinking.value.trim(),
+        explore: el.mapExplore.value.trim(),
+        plan: el.mapPlan.value.trim(),
+        verify: el.mapVerify.value.trim(),
+        fast: el.mapFast.value.trim()
+      };
+    }
+
+    function applyModelMappings(mappings) {
+      const safe = mappings || {};
+      el.mapMain.value = safe.main || "";
+      el.mapThinking.value = safe.thinking || "";
+      el.mapExplore.value = safe.explore || "";
+      el.mapPlan.value = safe.plan || "";
+      el.mapVerify.value = safe.verify || "";
+      el.mapFast.value = safe.fast || "";
+    }
+
+    function getResolvedModel() {
+      const provider = el.provider.value || "anthropic";
+      const slot = el.modelSlot.value || "main";
+      const mappings = getModelMappings();
+      if (slot === "auto") {
+        return "Auto routes to a role-specific model at send time";
+      }
+      if (slot === "custom") {
+        return el.model.value.trim() || mappings.main || getDefaultModelForSlot(provider, "main");
+      }
+      return mappings[slot] || getDefaultModelForSlot(provider, slot);
+    }
+
+    function updateModelUi() {
+      const custom = el.modelSlot.value === "custom";
+      el.model.disabled = state.running || !custom;
+      el.model.placeholder = custom
+        ? "Custom model override"
+        : "Switch to Custom if you want to type a one-off model";
+      const provider = el.provider.value || "anthropic";
+      for (const slot of MODEL_SLOTS) {
+        const inputId = "map" + slot.charAt(0).toUpperCase() + slot.slice(1);
+        if (el[inputId]) {
+          el[inputId].disabled = state.running;
+          el[inputId].placeholder = getDefaultModelForSlot(provider, slot);
+        }
+      }
+      const resolved = getResolvedModel();
+      const slotLabel = custom ? "custom override" : el.modelSlot.options[el.modelSlot.selectedIndex].text;
+      el.modelHint.textContent = el.modelSlot.value === "auto"
+        ? "Current role: Auto | Auto routes by task shape into main / thinking / explore / plan / verify / fast"
+        : "Current role: " + slotLabel + " | Resolved model: " + resolved;
     }
 
     function prefillPrompt(prompt, sendNow) {
@@ -819,11 +1481,64 @@ function buildWebviewHtml(nonce) {
         sendPrompt();
       }
     });
+    el.modelSlot.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.model.addEventListener("change", savePrefs);
     el.maxTokens.addEventListener("change", savePrefs);
+    el.mapMain.addEventListener("change", () => { updateModelUi(); savePrefs(); });
+    el.mapThinking.addEventListener("change", () => { updateModelUi(); savePrefs(); });
+    el.mapExplore.addEventListener("change", () => { updateModelUi(); savePrefs(); });
+    el.mapPlan.addEventListener("change", () => { updateModelUi(); savePrefs(); });
+    el.mapVerify.addEventListener("change", () => { updateModelUi(); savePrefs(); });
+    el.mapFast.addEventListener("change", () => { updateModelUi(); savePrefs(); });
+    el.connectionMode.addEventListener("change", () => {
+      updateConnectionUi();
+      updateModelUi();
+      savePrefs();
+      if (el.connectionMode.value === "vcp-agent") {
+        vscode.postMessage({
+          type: "refreshVcpState",
+          payload: {
+            connectionMode: el.connectionMode.value,
+            vcpAgentId: el.vcpAgent.value,
+            vcpTopicId: el.vcpTopic.value
+          }
+        });
+      }
+    });
+    el.provider.addEventListener("change", () => { updateConnectionUi(); updateModelUi(); savePrefs(); });
+    el.baseUrl.addEventListener("change", savePrefs);
+    el.apiKey.addEventListener("change", savePrefs);
+    el.vcpAgent.addEventListener("change", () => {
+      savePrefs();
+      vscode.postMessage({
+        type: "refreshVcpState",
+        payload: {
+          connectionMode: el.connectionMode.value,
+          vcpAgentId: el.vcpAgent.value,
+          vcpTopicId: ""
+        }
+      });
+    });
+    el.vcpTopic.addEventListener("change", () => {
+      savePrefs();
+      vscode.postMessage({
+        type: "refreshVcpState",
+        payload: {
+          connectionMode: el.connectionMode.value,
+          vcpAgentId: el.vcpAgent.value,
+          vcpTopicId: el.vcpTopic.value
+        }
+      });
+    });
     el.includeEditor.addEventListener("change", savePrefs);
     el.send.addEventListener("click", sendPrompt);
     el.stop.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
+    el.clearKey.addEventListener("click", () => {
+      el.apiKey.value = "";
+      state.hasApiKey = false;
+      updateConnectionUi();
+      vscode.postMessage({ type: "clearApiKey" });
+    });
     el.newBtn.addEventListener("click", () => {
       if (!state.running) {
         persistNow();
@@ -833,12 +1548,54 @@ function buildWebviewHtml(nonce) {
     el.quickStart.addEventListener("click", () => {
       if (!state.running) {
         setRunning(true);
-        vscode.postMessage({ type: "quickStart" });
+        savePrefs();
+        vscode.postMessage({
+          type: "quickStart",
+          payload: {
+            modelSlot: el.modelSlot.value,
+            model: el.model.value.trim(),
+            modelMappings: getModelMappings(),
+            connectionMode: el.connectionMode.value,
+            provider: el.provider.value,
+            baseUrl: el.baseUrl.value.trim(),
+            apiKey: el.apiKey.value.trim(),
+            vcpAgentId: el.vcpAgent.value,
+            vcpTopicId: el.vcpTopic.value
+          }
+        });
       }
     });
     el.viewFile.addEventListener("click", () => {
       if (!state.running) {
         vscode.postMessage({ type: "viewFile" });
+      }
+    });
+    el.refreshVcp.addEventListener("click", () => {
+      if (!state.running) {
+        savePrefs();
+        vscode.postMessage({
+          type: "refreshVcpState",
+          payload: {
+            connectionMode: el.connectionMode.value,
+            vcpAgentId: el.vcpAgent.value,
+            vcpTopicId: el.vcpTopic.value
+          }
+        });
+      }
+    });
+    el.newTopic.addEventListener("click", () => {
+      if (!state.running) {
+        const topicName = window.prompt("New VCP topic name", "");
+        if (topicName === null) return;
+        savePrefs();
+        vscode.postMessage({
+          type: "createVcpTopic",
+          payload: {
+            connectionMode: el.connectionMode.value,
+            vcpAgentId: el.vcpAgent.value,
+            topicName
+          }
+        });
       }
     });
     el.sessionNew.addEventListener("click", () => {
@@ -861,7 +1618,23 @@ function buildWebviewHtml(nonce) {
     });
     el.doctor.addEventListener("click", () => { if (!state.running) { setRunning(true); vscode.postMessage({ type: "runDoctor" }); } });
     el.status.addEventListener("click", () => { if (!state.running) { setRunning(true); vscode.postMessage({ type: "runStatus" }); } });
-    el.repl.addEventListener("click", () => vscode.postMessage({ type: "openRepl" }));
+    el.repl.addEventListener("click", () => {
+      savePrefs();
+      vscode.postMessage({
+      type: "openRepl",
+      payload: {
+        modelSlot: el.modelSlot.value,
+        model: el.model.value.trim(),
+        modelMappings: getModelMappings(),
+        connectionMode: el.connectionMode.value,
+        provider: el.provider.value,
+        baseUrl: el.baseUrl.value.trim(),
+        apiKey: el.apiKey.value.trim(),
+        vcpAgentId: el.vcpAgent.value,
+        vcpTopicId: el.vcpTopic.value
+      }
+      });
+    });
 
     el.chat.addEventListener("click", async (event) => {
       const target = event.target;
@@ -886,12 +1659,53 @@ function buildWebviewHtml(nonce) {
       const msg = event.data || {};
       const payload = msg.payload || {};
       if (msg.type === "init") {
+        el.modelSlot.value = payload.modelSlot || "auto";
         el.model.value = payload.model || "";
+        applyModelMappings(payload.modelMappings);
         el.maxTokens.value = payload.maxTokens || 1024;
         el.includeEditor.checked = Boolean(payload.includeEditorContext);
+        el.connectionMode.value = payload.connectionMode || "cc-switch";
+        el.provider.value = payload.provider || "anthropic";
+        el.baseUrl.value = payload.baseUrl || "";
+        state.vcpState = payload.vcpState || state.vcpState;
+        renderVcpOptions();
+        el.apiKey.value = "";
+        state.hasApiKey = Boolean(payload.hasApiKey);
         applySessionState(payload, { skipPersist: true });
-        if (state.messages.length === 0) addMessage("system", "Ready. Connected to local Claw runner.");
+        if (state.messages.length === 0) addMessage("system", "Ready. Choose CC switch, Direct API, or VCP Agent Memory above, then start chatting.");
+        updateConnectionUi();
+        updateModelUi();
         setRunning(false);
+        return;
+      }
+      if (msg.type === "prefsState") {
+        state.hasApiKey = Boolean(payload.hasApiKey);
+        if (payload.modelSlot) el.modelSlot.value = payload.modelSlot;
+        if (typeof payload.model === "string") el.model.value = payload.model;
+        if (payload.modelMappings) applyModelMappings(payload.modelMappings);
+        if (payload.connectionMode) el.connectionMode.value = payload.connectionMode;
+        if (payload.provider) el.provider.value = payload.provider;
+        if (typeof payload.baseUrl === "string") el.baseUrl.value = payload.baseUrl;
+        if (payload.vcpState) {
+          state.vcpState = payload.vcpState;
+          renderVcpOptions();
+        }
+        el.apiKey.value = "";
+        updateConnectionUi();
+        updateModelUi();
+        return;
+      }
+      if (msg.type === "vcpState") {
+        state.vcpState = payload || { available: false, agents: [], topics: [], history: [] };
+        renderVcpOptions();
+        updateConnectionUi();
+        return;
+      }
+      if (msg.type === "vcpHistoryLoaded") {
+        state.messages = normalizeMessages(payload.session);
+        state.assistantMessageIndex = -1;
+        render();
+        schedulePersist();
         return;
       }
       if (msg.type === "sessionState") {
@@ -1231,6 +2045,639 @@ function toSessionMetaList(sessions) {
     updatedAt: session.updatedAt,
     messageCount: session.messages.length
   }));
+}
+
+function normalizeConnectionMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "vcp" || raw === "vcp-agent") {
+    return "vcp-agent";
+  }
+  return raw === "direct" || raw === "manual" ? "manual" : "cc-switch";
+}
+
+function normalizeModelSlot(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "haiku") return "fast";
+  if (raw === "sonnet") return "main";
+  if (raw === "opus") return "thinking";
+  return raw === "auto" || raw === "thinking" || raw === "explore" || raw === "plan" || raw === "verify" || raw === "fast" || raw === "custom"
+    ? raw
+    : "main";
+}
+
+function normalizeProvider(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "openai" || raw === "xai") {
+    return raw;
+  }
+  return "anthropic";
+}
+
+function sanitizeModelMappings(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    main: String(source.main || source.sonnet || "").trim(),
+    thinking: String(source.thinking || source.opus || "").trim(),
+    explore: String(source.explore || source.sonnet || source.main || "").trim(),
+    plan: String(source.plan || source.sonnet || source.main || "").trim(),
+    verify: String(source.verify || source.sonnet || source.main || "").trim(),
+    fast: String(source.fast || source.haiku || "").trim()
+  };
+}
+
+function resolveModelPrefsPayload(payload, provider) {
+  const modelSlot = normalizeModelSlot(payload.modelSlot);
+  return {
+    customModel: String(payload.model || "").trim(),
+    modelSlot,
+    modelMappings: sanitizeModelMappings(payload.modelMappings || {}),
+    provider: normalizeProvider(provider)
+  };
+}
+
+function resolveRequestedModel(modelPrefs, provider) {
+  const normalizedProvider = normalizeProvider(provider);
+  if (modelPrefs.modelSlot === "custom") {
+    return modelPrefs.customModel || defaultModelForSlot(normalizedProvider, "main");
+  }
+  return modelPrefs.modelMappings[modelPrefs.modelSlot] || defaultModelForSlot(normalizedProvider, modelPrefs.modelSlot);
+}
+
+function resolveEffectiveRole(selectedRole, prompt, editorContext) {
+  if (selectedRole !== "auto") {
+    return selectedRole;
+  }
+  const lowered = `${prompt || ""}\n${editorContext || ""}`.toLowerCase();
+  if (
+    lowered.includes("测试") ||
+    lowered.includes("test") ||
+    lowered.includes("verify") ||
+    lowered.includes("校验") ||
+    lowered.includes("review") ||
+    lowered.includes("回归")
+  ) {
+    return "verify";
+  }
+  if (
+    lowered.includes("计划") ||
+    lowered.includes("方案") ||
+    lowered.includes("设计") ||
+    lowered.includes("plan") ||
+    lowered.includes("architecture") ||
+    lowered.includes("roadmap")
+  ) {
+    return "plan";
+  }
+  if (
+    lowered.includes("找") ||
+    lowered.includes("搜索") ||
+    lowered.includes("grep") ||
+    lowered.includes("where") ||
+    lowered.includes("locate") ||
+    lowered.includes("trace") ||
+    lowered.includes("explore")
+  ) {
+    return "explore";
+  }
+  if (
+    lowered.includes("think") ||
+    lowered.includes("reason") ||
+    lowered.includes("分析") ||
+    lowered.includes("推理") ||
+    lowered.includes("deep")
+  ) {
+    return "thinking";
+  }
+  if (
+    lowered.includes("rename") ||
+    lowered.includes("format") ||
+    lowered.includes("总结") ||
+    lowered.includes("summarize") ||
+    lowered.includes("quick")
+  ) {
+    return "fast";
+  }
+  return "main";
+}
+
+function appendRunnerConnectionArgs(args, connectionPrefs) {
+  if (!connectionPrefs || connectionPrefs.connectionMode === "cc-switch") {
+    return;
+  }
+  args.push("-ConnectionMode", "manual");
+  args.push("-Provider", connectionPrefs.provider);
+  if (connectionPrefs.apiKey) {
+    args.push("-ApiKey", connectionPrefs.apiKey);
+  }
+  if (connectionPrefs.baseUrl) {
+    args.push("-BaseUrl", connectionPrefs.baseUrl);
+  }
+}
+
+function describeConnection(connectionPrefs) {
+  if (!connectionPrefs || connectionPrefs.connectionMode === "cc-switch") {
+    return "cc-switch";
+  }
+  if (connectionPrefs.connectionMode === "vcp-agent") {
+    return "vcp-agent";
+  }
+  const provider = connectionPrefs.provider || "manual";
+  return connectionPrefs.baseUrl ? `${provider} via custom base URL` : provider;
+}
+
+function getVcpEnvironment(workspaceRoot) {
+  const vcpRoot = findVcpChatRoot(workspaceRoot);
+  if (!vcpRoot) {
+    throw new Error("VCPChat was not found next to the current workspace.");
+  }
+  const appDataRoot = path.join(vcpRoot, "AppData");
+  return {
+    vcpRoot,
+    appDataRoot,
+    settingsPath: path.join(appDataRoot, "settings.json"),
+    agentsDir: path.join(appDataRoot, "Agents"),
+    userDataDir: path.join(appDataRoot, "UserData")
+  };
+}
+
+function loadVcpSidebarState(env, prefs = {}) {
+  if (!pathExists(env.settingsPath)) {
+    throw new Error(`Missing VCP settings: ${env.settingsPath}`);
+  }
+  const settings = readJsonFile(env.settingsPath, {});
+  const agents = listVcpAgents(env.agentsDir);
+  const selectedAgentId = chooseExistingId(prefs.vcpAgentId, agents.map((item) => item.id));
+  const agentConfig = selectedAgentId ? readVcpAgentConfig(env.agentsDir, selectedAgentId) : null;
+  const topics = Array.isArray(agentConfig?.topics) ? agentConfig.topics : [];
+  const selectedTopicId = chooseExistingId(prefs.vcpTopicId, topics.map((item) => item.id));
+  const selectedAgent = agents.find((item) => item.id === selectedAgentId) || null;
+  const selectedTopic = topics.find((item) => item.id === selectedTopicId) || null;
+  const history = selectedAgentId && selectedTopicId
+    ? sanitizeSessionMessages(loadVcpHistory(env, selectedAgentId, selectedTopicId))
+    : [];
+  return {
+    available: true,
+    vcpRoot: env.vcpRoot,
+    vcpUrl: String(settings.vcpServerUrl || "").trim(),
+    hasApiKey: Boolean(String(settings.vcpApiKey || "").trim()),
+    selectedAgentId: selectedAgentId || "",
+    selectedAgentName: selectedAgent ? selectedAgent.name : "",
+    selectedTopicId: selectedTopicId || "",
+    selectedTopicName: selectedTopic ? selectedTopic.name : "",
+    agentModel: agentConfig && agentConfig.model ? String(agentConfig.model).trim() : "",
+    maxOutputTokens: agentConfig && agentConfig.maxOutputTokens ? Number(agentConfig.maxOutputTokens) || 0 : 0,
+    agents,
+    topics: topics.map((topic) => ({
+      id: String(topic.id || ""),
+      name: String(topic.name || topic.id || "Untitled Topic")
+    })),
+    history,
+    warning: buildVcpStateWarning(settings, selectedAgentId)
+  };
+}
+
+function buildVcpStateWarning(settings, selectedAgentId) {
+  const warnings = [];
+  if (!String(settings.vcpServerUrl || "").trim()) {
+    warnings.push("VCP server URL is missing in VCPChat/AppData/settings.json.");
+  }
+  if (!String(settings.vcpApiKey || "").trim()) {
+    warnings.push("VCP API key is missing in VCPChat/AppData/settings.json.");
+  }
+  if (!selectedAgentId) {
+    warnings.push("No VCP Agent is selected.");
+  }
+  return warnings.join(" ");
+}
+
+function listVcpAgents(agentsDir) {
+  if (!pathExists(agentsDir)) {
+    return [];
+  }
+  return fs.readdirSync(agentsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const config = readJsonFile(path.join(agentsDir, entry.name, "config.json"), {});
+      return {
+        id: entry.name,
+        name: String(config.name || entry.name)
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function readVcpAgentConfig(agentsDir, agentId) {
+  const configPath = path.join(agentsDir, agentId, "config.json");
+  if (!pathExists(configPath)) {
+    throw new Error(`Missing VCP Agent config: ${configPath}`);
+  }
+  return readJsonFile(configPath, {});
+}
+
+function loadVcpHistory(env, agentId, topicId) {
+  const historyPath = path.join(env.userDataDir, agentId, "topics", topicId, "history.json");
+  return readJsonFile(historyPath, []);
+}
+
+function saveVcpHistory(env, agentId, topicId, history) {
+  const historyPath = path.join(env.userDataDir, agentId, "topics", topicId, "history.json");
+  fs.mkdirSync(path.dirname(historyPath), { recursive: true });
+  fs.writeFileSync(historyPath, JSON.stringify(sanitizeHistoryEntries(history), null, 2), "utf8");
+}
+
+function sanitizeHistoryEntries(history) {
+  if (!Array.isArray(history)) {
+    return [];
+  }
+  return history
+    .filter((item) => item && typeof item === "object" && (item.role === "user" || item.role === "assistant" || item.role === "system"))
+    .map((item) => ({
+      role: item.role,
+      content: String(item.content || ""),
+      timestamp: Number(item.timestamp) || Date.now(),
+      id: typeof item.id === "string" && item.id ? item.id : createHistoryId(item.role)
+    }));
+}
+
+function createHistoryEntry(role, content) {
+  return {
+    role,
+    content: String(content || ""),
+    timestamp: Date.now(),
+    id: createHistoryId(role)
+  };
+}
+
+function createHistoryId(role) {
+  return `msg_${Date.now()}_${role}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function chooseExistingId(candidate, values) {
+  const list = Array.isArray(values) ? values.filter(Boolean) : [];
+  if (candidate && list.includes(candidate)) {
+    return candidate;
+  }
+  return list[0] || "";
+}
+
+function composeVcpUserContent(input, editorContext) {
+  const parts = [String(input || "").trim()];
+  if (editorContext && String(editorContext).trim()) {
+    parts.push(["[Editor Context]", editorContext.trim()].join("\n"));
+  }
+  return parts.filter(Boolean).join("\n\n");
+}
+
+async function executeVcpAgentPrompt(options) {
+  if (typeof fetch !== "function") {
+    throw new Error("This VS Code runtime does not expose fetch(), so VCP Agent mode is unavailable.");
+  }
+  const { state, history, signal } = options;
+  const env = {
+    vcpRoot: state.vcpRoot,
+    settingsPath: path.join(state.vcpRoot, "AppData", "settings.json"),
+    agentsDir: path.join(state.vcpRoot, "AppData", "Agents"),
+    userDataDir: path.join(state.vcpRoot, "AppData", "UserData")
+  };
+  const settings = readJsonFile(env.settingsPath, {});
+  const apiKey = String(settings.vcpApiKey || "").trim();
+  const baseUrl = String(settings.vcpServerUrl || "").trim();
+  if (!baseUrl) {
+    throw new Error("VCP server URL is missing in VCPChat/AppData/settings.json.");
+  }
+  if (!apiKey) {
+    throw new Error("VCP API key is missing in VCPChat/AppData/settings.json.");
+  }
+  const agentConfig = readVcpAgentConfig(env.agentsDir, state.selectedAgentId);
+  const systemPrompt = resolveVcpSystemPrompt(agentConfig);
+  const modelConfig = buildVcpModelConfig(agentConfig);
+  const endpoint = buildVcpEndpoint(baseUrl, settings.enableVcpToolInjection === true);
+  const messages = [];
+  if (systemPrompt) {
+    messages.push({ role: "system", content: systemPrompt });
+  }
+  for (const item of sanitizeHistoryEntries(history)) {
+    messages.push({ role: item.role, content: item.content });
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      messages,
+      ...modelConfig,
+      stream: false,
+      requestId: createHistoryId("vcp")
+    }),
+    signal
+  });
+
+  const raw = await response.text();
+  let payload = null;
+  try {
+    payload = raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    payload = null;
+  }
+  if (!response.ok) {
+    const message =
+      readNestedString(payload, ["message"]) ||
+      readNestedString(payload, ["error", "message"]) ||
+      readNestedString(payload, ["error"]) ||
+      clampText(raw || "", 400) ||
+      `HTTP ${response.status}`;
+    throw new Error(`VCP request failed (${response.status}): ${message}`);
+  }
+
+  const text = extractVcpResponseText(payload);
+  if (!text.trim()) {
+    throw new Error("VCP returned an empty response.");
+  }
+  return text.trim();
+}
+
+function buildVcpEndpoint(baseUrl, useToolInjection) {
+  const trimmed = String(baseUrl || "").trim();
+  const pathname = useToolInjection ? "/v1/chatvcp/completions" : "/v1/chat/completions";
+  return normalizeEndpoint(trimmed, pathname);
+}
+
+function buildVcpModelConfig(agentConfig) {
+  return {
+    model: String(agentConfig?.model || "").trim() || "gemini-pro",
+    temperature: agentConfig?.temperature !== undefined ? Number(agentConfig.temperature) : 0.7,
+    ...(agentConfig?.maxOutputTokens ? { max_tokens: Number(agentConfig.maxOutputTokens) || undefined } : {}),
+    ...(agentConfig?.contextTokenLimit !== undefined ? { contextTokenLimit: Number(agentConfig.contextTokenLimit) || undefined } : {}),
+    ...(agentConfig?.top_p !== undefined ? { top_p: Number(agentConfig.top_p) || undefined } : {}),
+    ...(agentConfig?.top_k !== undefined ? { top_k: Number(agentConfig.top_k) || undefined } : {})
+  };
+}
+
+function resolveVcpSystemPrompt(agentConfig) {
+  const config = agentConfig && typeof agentConfig === "object" ? agentConfig : {};
+  const promptMode = String(config.promptMode || "original");
+  if (promptMode === "preset") {
+    return String(config.presetSystemPrompt || "").trim();
+  }
+  if (promptMode === "modular") {
+    const advanced = config.advancedSystemPrompt;
+    if (advanced && typeof advanced === "object" && Array.isArray(advanced.blocks)) {
+      return advanced.blocks
+        .filter((block) => block && block.disabled !== true)
+        .map((block) => {
+          if (block.type === "newline") {
+            return "\n";
+          }
+          if (Array.isArray(block.variants) && block.variants.length > 0) {
+            const idx = Number.isInteger(block.selectedVariant) ? block.selectedVariant : 0;
+            return String(block.variants[idx] || block.content || "");
+          }
+          return String(block.content || "");
+        })
+        .join("")
+        .trim();
+    }
+    if (typeof advanced === "string") {
+      return advanced.trim();
+    }
+  }
+  return String(config.originalSystemPrompt || config.systemPrompt || "").trim();
+}
+
+function extractVcpResponseText(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+  const content = choice?.message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item.text === "string") return item.text;
+      return "";
+    }).join("");
+  }
+  if (typeof payload.content === "string") {
+    return payload.content;
+  }
+  return "";
+}
+
+function createVcpTopic(env, agentId, topicName) {
+  if (!agentId) {
+    throw new Error("Choose a VCP Agent before creating a topic.");
+  }
+  const configPath = path.join(env.agentsDir, agentId, "config.json");
+  const config = readJsonFile(configPath, {});
+  const topics = Array.isArray(config.topics) ? [...config.topics] : [];
+  const topic = {
+    id: `topic_${Date.now()}`,
+    name: topicName || `New Topic ${new Date().toLocaleTimeString("en-GB", { hour12: false })}`,
+    createdAt: Date.now(),
+    locked: true,
+    unread: false,
+    creatorSource: "claw-sidebar"
+  };
+  topics.unshift(topic);
+  config.topics = topics;
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+  saveVcpHistory(env, agentId, topic.id, []);
+  return topic;
+}
+
+function readJsonFile(filePath, fallback) {
+  try {
+    if (!pathExists(filePath)) {
+      return fallback;
+    }
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function quotePowerShellArg(value) {
+  const text = String(value ?? "");
+  if (/^[A-Za-z0-9_./:\\-]+$/.test(text)) {
+    return text;
+  }
+  return `'${text.replace(/'/g, "''")}'`;
+}
+
+function defaultModelForProvider(provider) {
+  return defaultModelForSlot(provider, "main");
+}
+
+function defaultModelForSlot(provider, slot) {
+  switch (provider) {
+    case "openai":
+      if (slot === "thinking") return "o4-mini";
+      if (slot === "explore") return "gpt-4.1-mini";
+      if (slot === "plan") return "o4-mini";
+      if (slot === "verify") return "gpt-4.1";
+      if (slot === "fast") return "gpt-4.1-nano";
+      return "gpt-4.1-mini";
+    case "xai":
+      if (slot === "thinking") return "grok-3";
+      if (slot === "explore") return "grok-3-mini";
+      if (slot === "plan") return "grok-3";
+      if (slot === "verify") return "grok-3";
+      if (slot === "fast") return "grok-3-mini";
+      return "grok-3-mini";
+    default:
+      if (slot === "thinking") return "claude-opus-4-6";
+      if (slot === "fast") return "claude-haiku-4-5-20251213";
+      return "claude-sonnet-4-6";
+  }
+}
+
+async function executeDirectApiPrompt(options) {
+  if (typeof fetch !== "function") {
+    throw new Error("This VS Code runtime does not expose fetch(), so direct API mode is unavailable.");
+  }
+
+  const provider = normalizeProvider(options.provider);
+  const endpoint = buildDirectApiEndpoint(provider, options.baseUrl);
+  const body = buildDirectApiRequestBody(provider, options.model, options.maxTokens, options.prompt);
+  const headers = buildDirectApiHeaders(provider, options.apiKey);
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: options.signal
+  });
+
+  const raw = await response.text();
+  let payload = null;
+  try {
+    payload = raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(formatDirectApiError(provider, response.status, payload, raw));
+  }
+
+  const text = extractDirectApiText(provider, payload);
+  if (!text.trim()) {
+    throw new Error("The provider returned an empty response.");
+  }
+  return text.trim();
+}
+
+function buildDirectApiEndpoint(provider, baseUrl) {
+  const trimmed = String(baseUrl || "").trim();
+  if (provider === "anthropic") {
+    return normalizeEndpoint(trimmed || "https://api.anthropic.com", "/v1/messages");
+  }
+  if (provider === "xai") {
+    return normalizeEndpoint(trimmed || "https://api.x.ai/v1", "/chat/completions");
+  }
+  return normalizeEndpoint(trimmed || "https://api.openai.com/v1", "/chat/completions");
+}
+
+function normalizeEndpoint(baseOrEndpoint, suffix) {
+  const trimmed = String(baseOrEndpoint || "").trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    return suffix;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered.endsWith(suffix.toLowerCase())) {
+    return trimmed;
+  }
+  if (suffix.startsWith("/v1/") && lowered.endsWith("/v1")) {
+    return `${trimmed}${suffix.slice(3)}`;
+  }
+  return `${trimmed}${suffix}`;
+}
+
+function buildDirectApiHeaders(provider, apiKey) {
+  if (provider === "anthropic") {
+    return {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    };
+  }
+  return {
+    "content-type": "application/json",
+    authorization: `Bearer ${apiKey}`
+  };
+}
+
+function buildDirectApiRequestBody(provider, model, maxTokens, prompt) {
+  if (provider === "anthropic") {
+    return {
+      model,
+      max_tokens: maxTokens,
+      messages: [{ role: "user", content: prompt }]
+    };
+  }
+  return {
+    model,
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content: prompt }],
+    stream: false
+  };
+}
+
+function extractDirectApiText(provider, payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  if (provider === "anthropic") {
+    if (!Array.isArray(payload.content)) {
+      return "";
+    }
+    return payload.content
+      .filter((item) => item && item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text)
+      .join("");
+  }
+  const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+  const content = choice && choice.message ? choice.message.content : "";
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+function formatDirectApiError(provider, status, payload, raw) {
+  const providerLabel = provider === "xai" ? "xAI" : provider === "openai" ? "OpenAI-compatible" : "Anthropic";
+  const message =
+    readNestedString(payload, ["error", "message"]) ||
+    readNestedString(payload, ["message"]) ||
+    clampText(String(raw || "").trim(), 500) ||
+    `HTTP ${status}`;
+  return `${providerLabel} request failed (${status}): ${message}`;
+}
+
+function readNestedString(value, pathParts) {
+  let current = value;
+  for (const part of pathParts) {
+    if (!current || typeof current !== "object" || !(part in current)) {
+      return "";
+    }
+    current = current[part];
+  }
+  return typeof current === "string" ? current : "";
 }
 
 function pathExists(targetPath) {
