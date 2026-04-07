@@ -10,14 +10,14 @@ const PREF_KEYS = {
   model: "clawSidebar.model",
   modelSlot: "clawSidebar.modelSlot",
   modelMappings: "clawSidebar.modelMappings",
-  showAdvancedModelSettings: "clawSidebar.showAdvancedModelSettings",
   maxTokens: "clawSidebar.maxTokens",
   includeEditorContext: "clawSidebar.includeEditorContext",
   connectionMode: "clawSidebar.connectionMode",
   provider: "clawSidebar.provider",
   baseUrl: "clawSidebar.baseUrl",
   vcpAgentId: "clawSidebar.vcpAgentId",
-  vcpTopicId: "clawSidebar.vcpTopicId"
+  vcpTopicId: "clawSidebar.vcpTopicId",
+  panelCollapsed: "clawSidebar.panelCollapsed"
 };
 const SECRET_KEYS = {
   apiKey: "clawSidebar.apiKey"
@@ -206,7 +206,6 @@ class ClawSidebarProvider {
       model: modelPrefs.model,
       modelSlot: modelPrefs.modelSlot,
       modelMappings: modelPrefs.modelMappings,
-      showAdvancedModelSettings: modelPrefs.showAdvancedModelSettings,
       maxTokens: this.context.workspaceState.get(PREF_KEYS.maxTokens, 1024),
       includeEditorContext: this.context.workspaceState.get(PREF_KEYS.includeEditorContext, true),
       connectionMode: prefs.connectionMode,
@@ -218,7 +217,8 @@ class ClawSidebarProvider {
       vcpState,
       sessions: toSessionMetaList(store.sessions),
       activeSessionId: active.id,
-      session: initialMessages
+      session: initialMessages,
+      panelCollapsed: this.context.workspaceState.get(PREF_KEYS.panelCollapsed, undefined)
     });
     if (this.pendingClientActions.length > 0) {
       for (const pending of this.pendingClientActions) {
@@ -238,11 +238,8 @@ class ClawSidebarProvider {
     if (Object.prototype.hasOwnProperty.call(payload, "modelMappings")) {
       await this.context.workspaceState.update(PREF_KEYS.modelMappings, sanitizeModelMappings(payload.modelMappings));
     }
-    if (Object.prototype.hasOwnProperty.call(payload, "showAdvancedModelSettings")) {
-      await this.context.workspaceState.update(
-        PREF_KEYS.showAdvancedModelSettings,
-        Boolean(payload.showAdvancedModelSettings)
-      );
+    if (Object.prototype.hasOwnProperty.call(payload, "panelCollapsed")) {
+      await this.context.workspaceState.update(PREF_KEYS.panelCollapsed, payload.panelCollapsed);
     }
     if (Object.prototype.hasOwnProperty.call(payload, "maxTokens")) {
       const parsed = Number(payload.maxTokens);
@@ -313,10 +310,7 @@ class ClawSidebarProvider {
     return {
       model: String(this.context.workspaceState.get(PREF_KEYS.model, "") || "").trim(),
       modelSlot: normalizeModelSlot(this.context.workspaceState.get(PREF_KEYS.modelSlot, "auto")),
-      modelMappings: sanitizeModelMappings(this.context.workspaceState.get(PREF_KEYS.modelMappings, {})),
-      showAdvancedModelSettings: Boolean(
-        this.context.workspaceState.get(PREF_KEYS.showAdvancedModelSettings, false)
-      )
+      modelMappings: sanitizeModelMappings(this.context.workspaceState.get(PREF_KEYS.modelMappings, {}))
     };
   }
 
@@ -1055,6 +1049,17 @@ function buildWebviewHtml(nonce, cspSource) {
     .tok-com { color: #7f848e; font-style: italic; }
     .tok-num { color: #61afef; }
     .tok-bi { color: #c678dd; }
+    .collapsible { border-bottom: 1px solid var(--border); }
+    .collapsible-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 8px; cursor: pointer; user-select: none;
+      font-size: 11px; font-weight: 600; color: var(--fg);
+    }
+    .collapsible-header:hover { background: color-mix(in srgb, var(--panel) 30%, transparent); }
+    .collapsible-chevron { font-size: 10px; color: var(--muted); transition: transform 0.15s ease; }
+    .collapsible-chevron.collapsed { transform: rotate(-90deg); }
+    .collapsible-body { padding: 0 8px 8px; display: grid; gap: 6px; }
+    .collapsible-body.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -1080,96 +1085,120 @@ function buildWebviewHtml(nonce, cspSource) {
     <span id="statusRunState" class="status-text">Idle</span>
   </div>
 </div>
-    <div class="title">Claw Code Sidebar v0.1.11</div>
-    <div class="session-row">
-      <select id="sessionSelect"></select>
-      <button id="sessionNew" class="secondary" title="New session">+</button>
-      <button id="sessionDelete" class="secondary" title="Delete session">-</button>
-    </div>
-    <div class="controls">
-      <select id="modelSlot">
-        <option value="auto">Auto</option>
-        <option value="main">Main</option>
-        <option value="thinking">Thinking</option>
-        <option value="explore">Explore</option>
-        <option value="plan">Plan</option>
-        <option value="verify">Verify</option>
-        <option value="fast">Fast</option>
-        <option value="custom">Custom</option>
-      </select>
-      <input id="model" type="text" placeholder="Custom model override" />
-      <input id="maxTokens" type="number" min="128" max="8192" step="128" />
-    </div>
-    <label class="mini"><input id="showAdvancedModelSettings" type="checkbox" />Show advanced model settings</label>
-    <div id="advancedModelSection" class="section" style="display:none;">
-      <div class="section-title">Role Model Mapping</div>
-      <div class="subtle">Map each orchestration role to a model. Leave a field empty to use the provider-specific default.</div>
-      <div class="mapping-grid">
-        <label class="field">
-          <span class="field-label">Main</span>
-          <input id="mapMain" type="text" placeholder="" />
-        </label>
-        <label class="field">
-          <span class="field-label">Thinking</span>
-          <input id="mapThinking" type="text" placeholder="" />
-        </label>
-        <label class="field">
-          <span class="field-label">Explore</span>
-          <input id="mapExplore" type="text" placeholder="" />
-        </label>
-        <label class="field">
-          <span class="field-label">Plan</span>
-          <input id="mapPlan" type="text" placeholder="" />
-        </label>
-        <label class="field">
-          <span class="field-label">Verify</span>
-          <input id="mapVerify" type="text" placeholder="" />
-        </label>
-        <label class="field">
-          <span class="field-label">Fast</span>
-          <input id="mapFast" type="text" placeholder="" />
-        </label>
+    <div class="collapsible" id="panelSession">
+      <div class="collapsible-header" data-panel="panelSession">
+        <span>会话与模型</span>
+        <span class="collapsible-chevron" id="panelSessionChevron">▼</span>
+      </div>
+      <div class="collapsible-body" id="panelSessionBody">
+        <div class="session-row">
+          <select id="sessionSelect"></select>
+          <button id="sessionNew" class="secondary" title="New session">+</button>
+          <button id="sessionDelete" class="secondary" title="Delete session">-</button>
+        </div>
+        <div class="controls">
+          <select id="modelSlot">
+            <option value="auto">Auto</option>
+            <option value="main">Main</option>
+            <option value="thinking">Thinking</option>
+            <option value="explore">Explore</option>
+            <option value="plan">Plan</option>
+            <option value="verify">Verify</option>
+            <option value="fast">Fast</option>
+            <option value="custom">Custom</option>
+          </select>
+          <input id="model" type="text" placeholder="Custom model override" />
+          <input id="maxTokens" type="number" min="128" max="8192" step="128" />
+        </div>
+        <label class="mini"><input id="includeEditor" type="checkbox" />Include active editor context</label>
       </div>
     </div>
-    <div id="modelHint" class="subtle"></div>
-    <div class="duo">
-      <select id="connectionMode">
-        <option value="cc-switch">CC switch</option>
-        <option value="manual">Direct API</option>
-        <option value="vcp-agent">VCP Agent Memory</option>
-      </select>
-      <select id="provider">
-        <option value="anthropic">Anthropic</option>
-        <option value="openai">OpenAI / OpenAI-compatible</option>
-        <option value="xai">xAI</option>
-      </select>
-    </div>
-    <input id="baseUrl" type="text" placeholder="Base URL (optional: leave empty for provider default)" />
-    <div class="secret-row">
-      <input id="apiKey" type="password" placeholder="API Key" />
-      <button id="clearKeyBtn" class="secondary" title="Clear saved API key">Clear Key</button>
-    </div>
-    <div id="connectionHint" class="subtle"></div>
-    <div id="vcpSection" class="section" style="display:none;">
-      <div class="section-title">VCP Memory Binding</div>
-      <div class="subtle">Bind this sidebar to a VCP Agent and Topic so memory lives inside VCPChat.</div>
-      <div class="duo">
-        <label class="field">
-          <span class="field-label">Agent</span>
-          <select id="vcpAgent"></select>
-        </label>
-        <label class="field">
-          <span class="field-label">Topic</span>
-          <select id="vcpTopic"></select>
-        </label>
+
+    <div class="collapsible" id="panelAdvanced">
+      <div class="collapsible-header" data-panel="panelAdvanced">
+        <span>高级模型设置</span>
+        <span class="collapsible-chevron collapsed" id="panelAdvancedChevron">▼</span>
       </div>
-      <div class="row">
-        <button id="refreshVcpBtn" class="secondary">Refresh VCP</button>
-        <button id="newTopicBtn" class="secondary">New Topic</button>
+      <div class="collapsible-body hidden" id="panelAdvancedBody">
+        <div class="section" style="border:none; padding:0; background:transparent;">
+          <div class="section-title">Role Model Mapping</div>
+          <div class="subtle">Map each orchestration role to a model. Leave empty for provider default.</div>
+          <div class="mapping-grid">
+            <label class="field">
+              <span class="field-label">Main</span>
+              <input id="mapMain" type="text" placeholder="" />
+            </label>
+            <label class="field">
+              <span class="field-label">Thinking</span>
+              <input id="mapThinking" type="text" placeholder="" />
+            </label>
+            <label class="field">
+              <span class="field-label">Explore</span>
+              <input id="mapExplore" type="text" placeholder="" />
+            </label>
+            <label class="field">
+              <span class="field-label">Plan</span>
+              <input id="mapPlan" type="text" placeholder="" />
+            </label>
+            <label class="field">
+              <span class="field-label">Verify</span>
+              <input id="mapVerify" type="text" placeholder="" />
+            </label>
+            <label class="field">
+              <span class="field-label">Fast</span>
+              <input id="mapFast" type="text" placeholder="" />
+            </label>
+          </div>
+        </div>
+        <div id="modelHint" class="subtle"></div>
       </div>
-      <div id="vcpHint" class="subtle"></div>
     </div>
-    <label class="mini"><input id="includeEditor" type="checkbox" />Include active editor context</label>
+
+    <div class="collapsible" id="panelConnection">
+      <div class="collapsible-header" data-panel="panelConnection">
+        <span>连接设置</span>
+        <span class="collapsible-chevron collapsed" id="panelConnectionChevron">▼</span>
+      </div>
+      <div class="collapsible-body hidden" id="panelConnectionBody">
+        <div class="duo">
+          <select id="connectionMode">
+            <option value="cc-switch">CC switch</option>
+            <option value="manual">Direct API</option>
+            <option value="vcp-agent">VCP Agent Memory</option>
+          </select>
+          <select id="provider">
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI / OpenAI-compatible</option>
+            <option value="xai">xAI</option>
+          </select>
+        </div>
+        <input id="baseUrl" type="text" placeholder="Base URL (optional: leave empty for provider default)" />
+        <div class="secret-row">
+          <input id="apiKey" type="password" placeholder="API Key" />
+          <button id="clearKeyBtn" class="secondary" title="Clear saved API key">Clear Key</button>
+        </div>
+        <div id="connectionHint" class="subtle"></div>
+        <div id="vcpSection" class="section" style="display:none;">
+          <div class="section-title">VCP Memory Binding</div>
+          <div class="subtle">Bind this sidebar to a VCP Agent and Topic so memory lives inside VCPChat.</div>
+          <div class="duo">
+            <label class="field">
+              <span class="field-label">Agent</span>
+              <select id="vcpAgent"></select>
+            </label>
+            <label class="field">
+              <span class="field-label">Topic</span>
+              <select id="vcpTopic"></select>
+            </label>
+          </div>
+          <div class="row">
+            <button id="refreshVcpBtn" class="secondary">Refresh VCP</button>
+            <button id="newTopicBtn" class="secondary">New Topic</button>
+          </div>
+          <div id="vcpHint" class="subtle"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="chat" class="chat"></div>
@@ -1323,8 +1352,6 @@ function buildWebviewHtml(nonce, cspSource) {
       modelSlot: document.getElementById("modelSlot"),
       model: document.getElementById("model"),
       maxTokens: document.getElementById("maxTokens"),
-      showAdvancedModelSettings: document.getElementById("showAdvancedModelSettings"),
-      advancedModelSection: document.getElementById("advancedModelSection"),
       mapMain: document.getElementById("mapMain"),
       mapThinking: document.getElementById("mapThinking"),
       mapExplore: document.getElementById("mapExplore"),
@@ -1347,7 +1374,13 @@ function buildWebviewHtml(nonce, cspSource) {
       vcpTopic: document.getElementById("vcpTopic"),
       refreshVcp: document.getElementById("refreshVcpBtn"),
       newTopic: document.getElementById("newTopicBtn"),
-      vcpHint: document.getElementById("vcpHint")
+      vcpHint: document.getElementById("vcpHint"),
+      panelSessionBody: document.getElementById("panelSessionBody"),
+      panelAdvancedBody: document.getElementById("panelAdvancedBody"),
+      panelConnectionBody: document.getElementById("panelConnectionBody"),
+      panelSessionChevron: document.getElementById("panelSessionChevron"),
+      panelAdvancedChevron: document.getElementById("panelAdvancedChevron"),
+      panelConnectionChevron: document.getElementById("panelConnectionChevron")
     };
 
     const state = {
@@ -1357,7 +1390,7 @@ function buildWebviewHtml(nonce, cspSource) {
       running: false,
       assistantMessageIndex: -1,
       hasApiKey: false,
-      showAdvancedModelSettings: false,
+      panelCollapsed: { panelSession: false, panelAdvanced: true, panelConnection: true },
       vcpState: { available: false, agents: [], topics: [], history: [] }
     };
     const MODEL_SLOTS = ["main", "thinking", "explore", "plan", "verify", "fast"];
@@ -1467,14 +1500,12 @@ function buildWebviewHtml(nonce, cspSource) {
       el.modelSlot.disabled = running;
       el.model.disabled = running;
       el.maxTokens.disabled = running;
-      el.showAdvancedModelSettings.disabled = running;
       el.connectionMode.disabled = running;
       el.includeEditor.disabled = running;
       el.stop.disabled = !running;
       setStatusLabel(running ? "Running" : "Idle", running ? "running" : "idle");
       updateConnectionUi();
       updateModelUi();
-      updateAdvancedModelUi();
       renderSessionSelect();
     }
 
@@ -1527,7 +1558,6 @@ function buildWebviewHtml(nonce, cspSource) {
           modelSlot: el.modelSlot.value,
           model: el.model.value,
           modelMappings: getModelMappings(),
-          showAdvancedModelSettings: el.showAdvancedModelSettings.checked,
           maxTokens: Number(el.maxTokens.value || 1024),
           includeEditorContext: el.includeEditor.checked,
           connectionMode: el.connectionMode.value,
@@ -1653,10 +1683,41 @@ function buildWebviewHtml(nonce, cspSource) {
         : "Current role: " + slotLabel + " | Resolved model: " + resolved;
     }
 
-    function updateAdvancedModelUi() {
-      state.showAdvancedModelSettings = Boolean(el.showAdvancedModelSettings.checked);
-      el.advancedModelSection.style.display = state.showAdvancedModelSettings ? "grid" : "none";
+    function togglePanel(panelId) {
+      const bodyId = panelId + "Body";
+      const chevronId = panelId + "Chevron";
+      const body = el[bodyId];
+      const chevron = el[chevronId];
+      if (!body || !chevron) return;
+      const collapsed = body.classList.toggle("hidden");
+      chevron.classList.toggle("collapsed", collapsed);
+      state.panelCollapsed[panelId] = collapsed;
+      vscode.postMessage({
+        type: "savePrefs",
+        payload: { panelCollapsed: { ...state.panelCollapsed } }
+      });
     }
+
+    function initPanels(saved) {
+      const defaults = { panelSession: false, panelAdvanced: true, panelConnection: true };
+      const collapsed = saved && typeof saved === "object" ? saved : defaults;
+      for (const panelId of ["panelSession", "panelAdvanced", "panelConnection"]) {
+        const body = el[panelId + "Body"];
+        const chevron = el[panelId + "Chevron"];
+        if (!body || !chevron) continue;
+        const isCollapsed = Boolean(collapsed[panelId]);
+        state.panelCollapsed[panelId] = isCollapsed;
+        body.classList.toggle("hidden", isCollapsed);
+        chevron.classList.toggle("collapsed", isCollapsed);
+      }
+    }
+
+    document.querySelectorAll(".collapsible-header").forEach((header) => {
+      header.addEventListener("click", () => {
+        const panelId = header.getAttribute("data-panel");
+        if (panelId) togglePanel(panelId);
+      });
+    });
 
     function prefillPrompt(prompt, sendNow) {
       const text = String(prompt || "").trim();
@@ -1675,7 +1736,6 @@ function buildWebviewHtml(nonce, cspSource) {
     el.modelSlot.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.model.addEventListener("change", savePrefs);
     el.maxTokens.addEventListener("change", savePrefs);
-    el.showAdvancedModelSettings.addEventListener("change", () => { updateAdvancedModelUi(); savePrefs(); });
     el.mapMain.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.mapThinking.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.mapExplore.addEventListener("change", () => { updateModelUi(); savePrefs(); });
@@ -1858,8 +1918,6 @@ function buildWebviewHtml(nonce, cspSource) {
         el.modelSlot.value = payload.modelSlot || "auto";
         el.model.value = payload.model || "";
         applyModelMappings(payload.modelMappings);
-        el.showAdvancedModelSettings.checked = Boolean(payload.showAdvancedModelSettings);
-        state.showAdvancedModelSettings = Boolean(payload.showAdvancedModelSettings);
         el.maxTokens.value = payload.maxTokens || 1024;
         el.includeEditor.checked = Boolean(payload.includeEditorContext);
         el.connectionMode.value = payload.connectionMode || "cc-switch";
@@ -1873,9 +1931,8 @@ function buildWebviewHtml(nonce, cspSource) {
         if (state.messages.length === 0) addMessage("system", "Ready. Choose CC switch, Direct API, or VCP Agent Memory above, then start chatting.");
         updateConnectionUi();
         updateModelUi();
-        updateAdvancedModelUi();
-        setStatusLabel("Ready", "idle");
         setRunning(false);
+        initPanels(payload.panelCollapsed);
         return;
       }
       if (msg.type === "prefsState") {
@@ -1883,9 +1940,8 @@ function buildWebviewHtml(nonce, cspSource) {
         if (payload.modelSlot) el.modelSlot.value = payload.modelSlot;
         if (typeof payload.model === "string") el.model.value = payload.model;
         if (payload.modelMappings) applyModelMappings(payload.modelMappings);
-        if (Object.prototype.hasOwnProperty.call(payload, "showAdvancedModelSettings")) {
-          el.showAdvancedModelSettings.checked = Boolean(payload.showAdvancedModelSettings);
-          state.showAdvancedModelSettings = Boolean(payload.showAdvancedModelSettings);
+        if (payload.panelCollapsed) {
+          initPanels(payload.panelCollapsed);
         }
         if (payload.connectionMode) el.connectionMode.value = payload.connectionMode;
         if (payload.provider) el.provider.value = payload.provider;
@@ -1897,7 +1953,6 @@ function buildWebviewHtml(nonce, cspSource) {
         el.apiKey.value = "";
         updateConnectionUi();
         updateModelUi();
-        updateAdvancedModelUi();
         setStatusLabel("Prefs saved", "idle");
         return;
       }
