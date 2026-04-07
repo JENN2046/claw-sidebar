@@ -1028,38 +1028,42 @@ function buildWebviewHtml(nonce, cspSource) {
     button.danger { background: #b42318; color: #fff; }
     button:hover { background: var(--btnhover); }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
- .status-bar { display: flex; align-items: center; gap: 4px; padding: 6px 8px; background: color-mix(in srgb, var(--panel) 80%, transparent); border-bottom: 1px solid var(--border); font-size: 11px; flex-wrap: wrap; }
- .status-item { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--bg) 60%, transparent); }
- .status-icon { font-size: 11px; }
- .status-text { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
- .status-sep { color: var(--muted); font-size: 10px; margin: 0 2px; }
- .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
- .status-dot.idle { background: #22c55e; box-shadow: 0 0 2px #22c55e; }
- .status-dot.running { background: #f59e0b; box-shadow: 0 0 2px #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
- .status-dot.error { background: #ef4444; box-shadow: 0 0 2px #ef4444; }
- @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-    .hint { color: var(--muted); font-size: 11px; }
-    .code { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 8px 0; }
-    .code-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 10px; color: var(--muted); text-transform: uppercase; }
-    .copy-btn { border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; background: color-mix(in srgb, var(--panel) 80%, transparent); color: var(--fg); font-size: 10px; }
-    .code pre { margin: 0; padding: 8px; overflow: auto; }
-    .code code { display: block; white-space: pre; font-family: var(--vscode-editor-font-family); }
-    .tok-kw { color: #d19a66; font-weight: 600; }
-    .tok-str { color: #98c379; }
-    .tok-com { color: #7f848e; font-style: italic; }
-    .tok-num { color: #61afef; }
-    .tok-bi { color: #c678dd; }
-    .collapsible { border-bottom: 1px solid var(--border); }
-    .collapsible-header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 6px 8px; cursor: pointer; user-select: none;
-      font-size: 11px; font-weight: 600; color: var(--fg);
-    }
-    .collapsible-header:hover { background: color-mix(in srgb, var(--panel) 30%, transparent); }
-    .collapsible-chevron { font-size: 10px; color: var(--muted); transition: transform 0.15s ease; }
-    .collapsible-chevron.collapsed { transform: rotate(-90deg); }
-    .collapsible-body { padding: 0 8px 8px; display: grid; gap: 6px; }
-    .collapsible-body.hidden { display: none; }
+  .status-bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: color-mix(in srgb, var(--panel) 60%, transparent); border-bottom: 1px solid var(--border); font-size: 11px; flex-wrap: wrap; }
+  .status-item { display: flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+  .status-icon { font-size: 12px; }
+  .status-text { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+  .status-sep { color: var(--muted); font-size: 10px; opacity: 0.4; margin: 0 1px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.idle { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
+  .status-dot.running { background: #f59e0b; box-shadow: 0 0 4px #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
+  .status-dot.error { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .collapsible { border-bottom: 1px solid var(--border); }
+  .collapsible-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 10px; cursor: pointer; user-select: none;
+    font-size: 12px; font-weight: 600; color: var(--fg);
+    border-left: 3px solid transparent; transition: all 0.15s ease;
+  }
+  .collapsible-header:hover {
+    background: color-mix(in srgb, var(--panel) 25%, transparent);
+    border-left-color: var(--btn);
+  }
+  .collapsible-chevron { font-size: 10px; color: var(--muted); transition: transform 0.2s ease; opacity: 0.6; }
+  .collapsible-chevron.collapsed { transform: rotate(-90deg); }
+  .collapsible-body { padding: 0 10px 10px; display: grid; gap: 6px; }
+  .collapsible-body.hidden { display: none; }
+  .hint { color: var(--muted); font-size: 11px; }
+  .code { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 8px 0; }
+  .code-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 10px; color: var(--muted); text-transform: uppercase; }
+  .copy-btn { border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; background: color-mix(in srgb, var(--panel) 80%, transparent); color: var(--fg); font-size: 10px; }
+  .code pre { margin: 0; padding: 8px; overflow: auto; }
+  .code code { display: block; white-space: pre; font-family: var(--vscode-editor-font-family); }
+  .tok-kw { color: #d19a66; font-weight: 600; }
+  .tok-str { color: #98c379; }
+  .tok-com { color: #7f848e; font-style: italic; }
+  .tok-num { color: #61afef; }
+  .tok-bi { color: #c678dd; }
   </style>
 </head>
 <body>
