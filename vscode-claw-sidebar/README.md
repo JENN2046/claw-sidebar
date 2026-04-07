@@ -27,6 +27,23 @@ This extension provides a Claude Code-like sidebar chat workflow for local `claw
 - Built binary exists: `rust/target/debug/claw.exe`
 - Runner script exists: `rust/run-with-cc-switch.ps1`
 - CC switch config exists: `%USERPROFILE%\.cc-switch`
+- Node.js installed
+
+## Cross-machine notes
+
+This repo is now more portable than before:
+
+- `run-with-cc-switch.ps1` no longer depends on the hardcoded local path `A:/VCP/VCPToolBox/node_modules/better-sqlite3`
+- it prefers Node.js 22+ built-in `node:sqlite`
+- on older Node versions it can still fall back to `better-sqlite3` if that package is installed locally
+
+For a fresh machine, the practical setup is:
+
+1. clone the repo
+2. install Rust
+3. install Node.js 22+
+4. install and configure CC switch
+5. open the repo and run `Quick Start`
 
 ## Run (Development Host)
 

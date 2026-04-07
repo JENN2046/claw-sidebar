@@ -17,39 +17,79 @@ if (!(Test-Path $ccSwitchDir)) {
     throw "CC switch config directory not found: $ccSwitchDir"
 }
 
+$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+    throw "Node.js is required to read the CC switch database. Install Node.js 22+ and try again."
+}
+
 $nodeScript = @'
-let Database;
-try {
-  Database = require("better-sqlite3");
-} catch (_) {
+const query = "SELECT settings_config FROM providers WHERE app_type='claude' AND is_current=1 LIMIT 1";
+
+function readWithNodeSqlite(dbPath) {
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    Database = require("A:/VCP/VCPToolBox/node_modules/better-sqlite3");
-  } catch (e) {
-    console.error("Cannot load better-sqlite3. Install dependencies in VCPToolBox first.");
-    process.exit(2);
+    const row = db.prepare(query).get();
+    return row ? row.settings_config : null;
+  } finally {
+    if (typeof db.close === "function") db.close();
   }
 }
 
-const db = new Database(process.argv[2], { readonly: true });
-const row = db
-  .prepare("SELECT settings_config FROM providers WHERE app_type='claude' AND is_current=1 LIMIT 1")
-  .get();
+function readWithBetterSqlite3(dbPath) {
+  const Database = require("better-sqlite3");
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const row = db.prepare(query).get();
+    return row ? row.settings_config : null;
+  } finally {
+    db.close();
+  }
+}
 
-if (!row) {
+const loaders = [
+  { name: "node:sqlite", fn: readWithNodeSqlite },
+  { name: "better-sqlite3", fn: readWithBetterSqlite3 }
+];
+
+const dbPath = process.argv[2];
+let settingsConfig = null;
+let readSucceeded = false;
+const errors = [];
+
+for (const loader of loaders) {
+  try {
+    settingsConfig = loader.fn(dbPath);
+    readSucceeded = true;
+    break;
+  } catch (error) {
+    errors.push(`${loader.name}: ${error.message}`);
+  }
+}
+
+if (!readSucceeded) {
+  console.error("Unable to read cc-switch.db.");
+  console.error("Install Node.js 22+ so the built-in node:sqlite module is available, or install better-sqlite3.");
+  console.error(errors.join("\n"));
+  process.exit(2);
+}
+
+if (!settingsConfig) {
   console.error("No current Claude provider found in cc-switch.db.");
   process.exit(3);
 }
 
 let cfg = {};
 try {
-  cfg = JSON.parse(row.settings_config || "{}");
+  cfg = JSON.parse(settingsConfig || "{}");
 } catch (_) {}
 
 process.stdout.write(JSON.stringify(cfg.env || {}));
 '@
 
 $dbPath = Join-Path $ccSwitchDir "cc-switch.db"
-$envJson = $nodeScript | node - $dbPath
+$env:NODE_NO_WARNINGS = "1"
+$envJson = $nodeScript | & $nodeCommand.Source - $dbPath
 $envMap = $envJson | ConvertFrom-Json
 
 if (-not $envMap.ANTHROPIC_API_KEY -or -not $envMap.ANTHROPIC_BASE_URL) {
