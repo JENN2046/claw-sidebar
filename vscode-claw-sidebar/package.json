@@ -2,7 +2,7 @@
   "name": "claw-sidebar",
   "displayName": "Claw Sidebar",
   "description": "Claude Code-style VS Code sidebar for local Claw with CC switch, direct API, role-based model mapping, and VCP Agent memory.",
-  "version": "0.1.5",
+  "version": "0.1.11",
   "publisher": "local",
   "license": "MIT",
   "repository": {

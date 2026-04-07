@@ -10,6 +10,7 @@ const PREF_KEYS = {
   model: "clawSidebar.model",
   modelSlot: "clawSidebar.modelSlot",
   modelMappings: "clawSidebar.modelMappings",
+  showAdvancedModelSettings: "clawSidebar.showAdvancedModelSettings",
   maxTokens: "clawSidebar.maxTokens",
   includeEditorContext: "clawSidebar.includeEditorContext",
   connectionMode: "clawSidebar.connectionMode",
@@ -84,6 +85,9 @@ class ClawSidebarProvider {
     this.view = null;
     this.activeRun = null;
     this.pendingClientActions = [];
+    this.output = vscode.window.createOutputChannel("Claw Sidebar");
+    this.context.subscriptions.push(this.output);
+    this.log("Provider created.");
   }
 
   async reveal() {
@@ -93,21 +97,39 @@ class ClawSidebarProvider {
   invokeClientAction(action, payload = {}) {
     const event = { action, payload };
     if (!this.view) {
+      this.log(`Queue invoke action: ${action}`);
       this.pendingClientActions.push(event);
       return;
     }
+    this.log(`Invoke action: ${action}`);
     this.post("invoke", event);
   }
 
   resolveWebviewView(webviewView) {
     this.view = webviewView;
     webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = buildWebviewHtml(String(Date.now()));
+    const nonce = createNonce();
+    webviewView.webview.html = buildWebviewHtml(nonce, webviewView.webview.cspSource);
+    this.log("Webview resolved and HTML rendered.");
 
-    webviewView.onDidDispose(() => this.stopActiveProcess());
+    webviewView.onDidDispose(() => {
+      this.log("Webview disposed.");
+      this.stopActiveProcess();
+    });
     webviewView.webview.onDidReceiveMessage(async (message) => {
       try {
+        const messageType = message && typeof message.type === "string" ? message.type : "<unknown>";
+        this.log(`Received message: ${messageType}`);
         switch (message.type) {
+          case "clientBoot":
+            this.log(`Client boot: ${safeJson(message.payload || {})}`);
+            break;
+          case "clientError":
+            this.log(`Client error: ${safeJson(message.payload || {})}`);
+            this.post("error", {
+              message: `Webview error: ${(message.payload && message.payload.message) || "unknown"}`
+            });
+            break;
           case "init":
             await this.handleInit();
             break;
@@ -157,9 +179,11 @@ class ClawSidebarProvider {
             await this.viewFile();
             break;
           default:
+            this.log(`Unhandled message: ${messageType}`);
             break;
         }
       } catch (error) {
+        this.log(`Message handler failed: ${error instanceof Error ? error.stack || error.message : String(error)}`);
         this.post("error", {
           message: error instanceof Error ? error.message : String(error)
         });
@@ -182,6 +206,7 @@ class ClawSidebarProvider {
       model: modelPrefs.model,
       modelSlot: modelPrefs.modelSlot,
       modelMappings: modelPrefs.modelMappings,
+      showAdvancedModelSettings: modelPrefs.showAdvancedModelSettings,
       maxTokens: this.context.workspaceState.get(PREF_KEYS.maxTokens, 1024),
       includeEditorContext: this.context.workspaceState.get(PREF_KEYS.includeEditorContext, true),
       connectionMode: prefs.connectionMode,
@@ -212,6 +237,12 @@ class ClawSidebarProvider {
     }
     if (Object.prototype.hasOwnProperty.call(payload, "modelMappings")) {
       await this.context.workspaceState.update(PREF_KEYS.modelMappings, sanitizeModelMappings(payload.modelMappings));
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "showAdvancedModelSettings")) {
+      await this.context.workspaceState.update(
+        PREF_KEYS.showAdvancedModelSettings,
+        Boolean(payload.showAdvancedModelSettings)
+      );
     }
     if (Object.prototype.hasOwnProperty.call(payload, "maxTokens")) {
       const parsed = Number(payload.maxTokens);
@@ -282,7 +313,10 @@ class ClawSidebarProvider {
     return {
       model: String(this.context.workspaceState.get(PREF_KEYS.model, "") || "").trim(),
       modelSlot: normalizeModelSlot(this.context.workspaceState.get(PREF_KEYS.modelSlot, "auto")),
-      modelMappings: sanitizeModelMappings(this.context.workspaceState.get(PREF_KEYS.modelMappings, {}))
+      modelMappings: sanitizeModelMappings(this.context.workspaceState.get(PREF_KEYS.modelMappings, {})),
+      showAdvancedModelSettings: Boolean(
+        this.context.workspaceState.get(PREF_KEYS.showAdvancedModelSettings, false)
+      )
     };
   }
 
@@ -670,33 +704,41 @@ class ClawSidebarProvider {
   }
 
   async refreshVcpState(payload = {}) {
-    const workspaceRoot = getWorkspaceRoot();
-    const prefs = await this.resolveConnectionPrefs(payload);
-    const vcpState = await this.getVcpState(workspaceRoot, prefs);
-    this.post("vcpState", vcpState);
-    if (prefs.connectionMode === "vcp-agent" && Array.isArray(vcpState.history)) {
-      this.post("vcpHistoryLoaded", {
-        session: vcpState.history,
-        topicId: vcpState.selectedTopicId,
-        topicName: vcpState.selectedTopicName || vcpState.selectedTopicId
-      });
+    try {
+      const workspaceRoot = getWorkspaceRoot();
+      const prefs = await this.resolveConnectionPrefs(payload);
+      const vcpState = await this.getVcpState(workspaceRoot, prefs);
+      this.post("vcpState", vcpState);
+      if (prefs.connectionMode === "vcp-agent" && Array.isArray(vcpState.history)) {
+        this.post("vcpHistoryLoaded", {
+          session: vcpState.history,
+          topicId: vcpState.selectedTopicId,
+          topicName: vcpState.selectedTopicName || vcpState.selectedTopicId
+        });
+      }
+    } catch (error) {
+      this.post("error", { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
   async createVcpTopic(payload = {}) {
-    const workspaceRoot = getWorkspaceRoot();
-    const prefs = await this.resolveConnectionPrefs(payload);
-    const env = getVcpEnvironment(workspaceRoot);
-    const topic = await createVcpTopic(env, prefs.vcpAgentId, String(payload.topicName || "").trim());
-    await this.context.workspaceState.update(PREF_KEYS.vcpTopicId, topic.id);
-    const nextPrefs = { ...prefs, vcpTopicId: topic.id };
-    const vcpState = await this.getVcpState(workspaceRoot, nextPrefs);
-    this.post("vcpState", vcpState);
-    this.post("vcpHistoryLoaded", {
-      session: [],
-      topicId: topic.id,
-      topicName: topic.name
-    });
+    try {
+      const workspaceRoot = getWorkspaceRoot();
+      const prefs = await this.resolveConnectionPrefs(payload);
+      const env = getVcpEnvironment(workspaceRoot);
+      const topic = await createVcpTopic(env, prefs.vcpAgentId, String(payload.topicName || "").trim());
+      await this.context.workspaceState.update(PREF_KEYS.vcpTopicId, topic.id);
+      const nextPrefs = { ...prefs, vcpTopicId: topic.id };
+      const vcpState = await this.getVcpState(workspaceRoot, nextPrefs);
+      this.post("vcpState", vcpState);
+      this.post("vcpHistoryLoaded", {
+        session: [],
+        topicId: topic.id,
+        topicName: topic.name
+      });
+    } catch (error) {
+      this.post("error", { message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async getVcpState(workspaceRoot, prefs) {
@@ -921,17 +963,25 @@ class ClawSidebarProvider {
 
   post(type, payload) {
     if (this.view) {
-      this.view.webview.postMessage({ type, payload });
+      try {
+        this.view.webview.postMessage({ type, payload });
+      } catch (error) {
+        this.log(`Post failed (${type}): ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+  }
+
+  log(message) {
+    this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
   }
 }
 
-function buildWebviewHtml(nonce) {
-  return `<!doctype html>
+function buildWebviewHtml(nonce, cspSource) {
+  return String.raw`<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} https: data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     :root {
@@ -1030,7 +1080,7 @@ function buildWebviewHtml(nonce) {
     <span id="statusRunState" class="status-text">Idle</span>
   </div>
 </div>
-    <div class="title">Claw Code Sidebar</div>
+    <div class="title">Claw Code Sidebar v0.1.11</div>
     <div class="session-row">
       <select id="sessionSelect"></select>
       <button id="sessionNew" class="secondary" title="New session">+</button>
@@ -1050,7 +1100,8 @@ function buildWebviewHtml(nonce) {
       <input id="model" type="text" placeholder="Custom model override" />
       <input id="maxTokens" type="number" min="128" max="8192" step="128" />
     </div>
-    <div class="section">
+    <label class="mini"><input id="showAdvancedModelSettings" type="checkbox" />Show advanced model settings</label>
+    <div id="advancedModelSection" class="section" style="display:none;">
       <div class="section-title">Role Model Mapping</div>
       <div class="subtle">Map each orchestration role to a model. Leave a field empty to use the provider-specific default.</div>
       <div class="mapping-grid">
@@ -1079,8 +1130,8 @@ function buildWebviewHtml(nonce) {
           <input id="mapFast" type="text" placeholder="" />
         </label>
       </div>
-      <div id="modelHint" class="subtle"></div>
     </div>
+    <div id="modelHint" class="subtle"></div>
     <div class="duo">
       <select id="connectionMode">
         <option value="cc-switch">CC switch</option>
@@ -1139,7 +1190,123 @@ function buildWebviewHtml(nonce) {
   </div>
 
   <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
+    (function () {
+      window.__clawVsCodeApi = window.__clawVsCodeApi || acquireVsCodeApi();
+      const vscode = window.__clawVsCodeApi;
+      const reportBoot = (phase, extra) => {
+        try {
+          vscode.postMessage({ type: "clientBoot", payload: { phase, ...(extra || {}) } });
+        } catch (_) {
+          // best effort
+        }
+      };
+      const get = (id) => document.getElementById(id);
+      const text = (id) => {
+        const el = get(id);
+        return el && typeof el.value === "string" ? el.value.trim() : "";
+      };
+      const num = (id, fallback) => {
+        const n = Number(text(id));
+        return Number.isFinite(n) && n > 0 ? n : fallback;
+      };
+      const bool = (id) => {
+        const el = get(id);
+        return Boolean(el && el.checked);
+      };
+      const status = (label, kind) => {
+        const state = get("statusRunState");
+        const dot = get("statusIndicator");
+        if (state) state.textContent = label;
+        if (dot) dot.className = "status-dot " + (kind || "idle");
+      };
+      const commonPayload = () => ({
+        modelSlot: text("modelSlot"),
+        model: text("model"),
+        maxTokens: num("maxTokens", 1024),
+        includeEditorContext: bool("includeEditor"),
+        connectionMode: text("connectionMode"),
+        provider: text("provider"),
+        baseUrl: text("baseUrl"),
+        apiKey: text("apiKey"),
+        vcpAgentId: text("vcpAgent"),
+        vcpTopicId: text("vcpTopic")
+      });
+      const bind = (id, type, payloadBuilder, asPayload = false) => {
+        const el = get(id);
+        if (!el) return;
+        el.addEventListener("click", () => {
+          if (window.__clawMainReady) return;
+          const payload = payloadBuilder ? payloadBuilder() : undefined;
+          if (payload === null) return;
+          status("Fallback: " + type, "running");
+          if (asPayload && payload && typeof payload === "object" && !Array.isArray(payload)) {
+            vscode.postMessage({ type, payload });
+            return;
+          }
+          vscode.postMessage({ type, ...(payload || {}) });
+        });
+      };
+
+      bind("viewFileBtn", "viewFile");
+      bind("quickStartBtn", "quickStart", () => commonPayload(), true);
+      bind("doctorBtn", "runDoctor");
+      bind("statusBtn", "runStatus");
+      bind("stopBtn", "stop");
+      bind("sendBtn", "ask", () => {
+        const input = text("input");
+        if (!input) {
+          status("Fallback: input is empty", "error");
+          return null;
+        }
+        return {
+          input,
+          history: [],
+          ...commonPayload()
+        };
+      });
+      status("Booting UI...", "idle");
+      reportBoot("fallback-ready");
+    })();
+  </script>
+
+  <script nonce="${nonce}">
+    window.__clawMainReady = false;
+    window.__clawVsCodeApi = window.__clawVsCodeApi || acquireVsCodeApi();
+    const vscode = window.__clawVsCodeApi;
+    const reportBoot = (phase, extra) => {
+      try {
+        vscode.postMessage({ type: "clientBoot", payload: { phase, ...(extra || {}) } });
+      } catch (_) {
+        // best effort
+      }
+    };
+    window.addEventListener("error", (event) => {
+      const payload = {
+        message: String(event.message || event.error || "unknown error"),
+        source: String(event.filename || ""),
+        line: Number(event.lineno || 0),
+        col: Number(event.colno || 0)
+      };
+      reportBoot("window-error", payload);
+      try {
+        vscode.postMessage({ type: "clientError", payload });
+      } catch (_) {
+        // best effort
+      }
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event && Object.prototype.hasOwnProperty.call(event, "reason") ? event.reason : "";
+      const message = typeof reason === "string"
+        ? reason
+        : (reason && typeof reason.message === "string" ? reason.message : String(reason || "unhandled rejection"));
+      reportBoot("unhandled-rejection", { message });
+      try {
+        vscode.postMessage({ type: "clientError", payload: { message } });
+      } catch (_) {
+        // best effort
+      }
+    });
+    reportBoot("main-script-start");
     const el = {
       chat: document.getElementById("chat"),
       input: document.getElementById("input"),
@@ -1151,9 +1318,13 @@ function buildWebviewHtml(nonce) {
       doctor: document.getElementById("doctorBtn"),
       status: document.getElementById("statusBtn"),
       repl: document.getElementById("replBtn"),
+      statusIndicator: document.getElementById("statusIndicator"),
+      statusRunState: document.getElementById("statusRunState"),
       modelSlot: document.getElementById("modelSlot"),
       model: document.getElementById("model"),
       maxTokens: document.getElementById("maxTokens"),
+      showAdvancedModelSettings: document.getElementById("showAdvancedModelSettings"),
+      advancedModelSection: document.getElementById("advancedModelSection"),
       mapMain: document.getElementById("mapMain"),
       mapThinking: document.getElementById("mapThinking"),
       mapExplore: document.getElementById("mapExplore"),
@@ -1186,6 +1357,7 @@ function buildWebviewHtml(nonce) {
       running: false,
       assistantMessageIndex: -1,
       hasApiKey: false,
+      showAdvancedModelSettings: false,
       vcpState: { available: false, agents: [], topics: [], history: [] }
     };
     const MODEL_SLOTS = ["main", "thinking", "explore", "plan", "verify", "fast"];
@@ -1225,7 +1397,7 @@ function buildWebviewHtml(nonce) {
     function renderSessionSelect() {
       const html = state.sessions.map((s) => {
         const selected = s.id === state.activeSessionId ? " selected" : "";
-        return "<option value=\\"" + escapeHtml(s.id) + "\\"" + selected + ">" + escapeHtml(s.title || "New Chat") + "</option>";
+        return '<option value="' + escapeHtml(s.id) + '"' + selected + ">" + escapeHtml(s.title || "New Chat") + "</option>";
       }).join("");
       el.sessionSelect.innerHTML = html;
       const vcpMode = el.connectionMode.value === "vcp-agent";
@@ -1234,27 +1406,36 @@ function buildWebviewHtml(nonce) {
       el.sessionDelete.disabled = state.running || state.sessions.length === 0 || vcpMode;
     }
 
+    function setStatusLabel(text, kind) {
+      if (el.statusRunState) {
+        el.statusRunState.textContent = text;
+      }
+      if (el.statusIndicator) {
+        el.statusIndicator.className = "status-dot " + (kind || "idle");
+      }
+    }
+
     function renderVcpOptions() {
       const agents = Array.isArray(state.vcpState.agents) ? state.vcpState.agents : [];
       const topics = Array.isArray(state.vcpState.topics) ? state.vcpState.topics : [];
       el.vcpAgent.innerHTML = agents.length
         ? agents.map((item) => {
             const selected = item.id === state.vcpState.selectedAgentId ? " selected" : "";
-            return "<option value=\\"" + escapeHtml(item.id) + "\\"" + selected + ">" + escapeHtml(item.name || item.id) + "</option>";
+            return '<option value="' + escapeHtml(item.id) + '"' + selected + ">" + escapeHtml(item.name || item.id) + "</option>";
           }).join("")
-        : "<option value=\"\">No VCP Agents found</option>";
+        : '<option value="">No VCP Agents found</option>';
       el.vcpTopic.innerHTML = topics.length
         ? topics.map((item) => {
             const selected = item.id === state.vcpState.selectedTopicId ? " selected" : "";
-            return "<option value=\\"" + escapeHtml(item.id) + "\\"" + selected + ">" + escapeHtml(item.name || item.id) + "</option>";
+            return '<option value="' + escapeHtml(item.id) + '"' + selected + ">" + escapeHtml(item.name || item.id) + "</option>";
           }).join("")
-        : "<option value=\"\">No Topics found</option>";
+        : '<option value="">No Topics found</option>';
     }
 
     function render(scroll = true) {
       el.chat.innerHTML = state.messages.map((m) => {
         const who = m.role === "user" ? "You" : (m.role === "assistant" ? "Claw" : "System");
-        return "<div class=\\"msg " + m.role + "\\"><span class=\\"label\\">" + who + "</span><div>" + renderMessageHtml(m) + "</div></div>";
+        return '<div class="msg ' + m.role + '"><span class="label">' + who + "</span><div>" + renderMessageHtml(m) + "</div></div>";
       }).join("");
       if (scroll) el.chat.scrollTop = el.chat.scrollHeight;
     }
@@ -1286,11 +1467,14 @@ function buildWebviewHtml(nonce) {
       el.modelSlot.disabled = running;
       el.model.disabled = running;
       el.maxTokens.disabled = running;
+      el.showAdvancedModelSettings.disabled = running;
       el.connectionMode.disabled = running;
       el.includeEditor.disabled = running;
       el.stop.disabled = !running;
+      setStatusLabel(running ? "Running" : "Idle", running ? "running" : "idle");
       updateConnectionUi();
       updateModelUi();
+      updateAdvancedModelUi();
       renderSessionSelect();
     }
 
@@ -1316,6 +1500,7 @@ function buildWebviewHtml(nonce) {
       state.assistantMessageIndex = state.messages.length;
       addMessage("assistant", "");
       setRunning(true);
+      setStatusLabel("Sending request...", "running");
       savePrefs();
       vscode.postMessage({
         type: "ask",
@@ -1342,6 +1527,7 @@ function buildWebviewHtml(nonce) {
           modelSlot: el.modelSlot.value,
           model: el.model.value,
           modelMappings: getModelMappings(),
+          showAdvancedModelSettings: el.showAdvancedModelSettings.checked,
           maxTokens: Number(el.maxTokens.value || 1024),
           includeEditorContext: el.includeEditor.checked,
           connectionMode: el.connectionMode.value,
@@ -1467,6 +1653,11 @@ function buildWebviewHtml(nonce) {
         : "Current role: " + slotLabel + " | Resolved model: " + resolved;
     }
 
+    function updateAdvancedModelUi() {
+      state.showAdvancedModelSettings = Boolean(el.showAdvancedModelSettings.checked);
+      el.advancedModelSection.style.display = state.showAdvancedModelSettings ? "grid" : "none";
+    }
+
     function prefillPrompt(prompt, sendNow) {
       const text = String(prompt || "").trim();
       if (!text) return;
@@ -1484,6 +1675,7 @@ function buildWebviewHtml(nonce) {
     el.modelSlot.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.model.addEventListener("change", savePrefs);
     el.maxTokens.addEventListener("change", savePrefs);
+    el.showAdvancedModelSettings.addEventListener("change", () => { updateAdvancedModelUi(); savePrefs(); });
     el.mapMain.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.mapThinking.addEventListener("change", () => { updateModelUi(); savePrefs(); });
     el.mapExplore.addEventListener("change", () => { updateModelUi(); savePrefs(); });
@@ -1567,11 +1759,13 @@ function buildWebviewHtml(nonce) {
     });
     el.viewFile.addEventListener("click", () => {
       if (!state.running) {
+        setStatusLabel("Opening file picker...", "running");
         vscode.postMessage({ type: "viewFile" });
       }
     });
     el.refreshVcp.addEventListener("click", () => {
       if (!state.running) {
+        setStatusLabel("Refreshing VCP...", "running");
         savePrefs();
         vscode.postMessage({
           type: "refreshVcpState",
@@ -1587,6 +1781,7 @@ function buildWebviewHtml(nonce) {
       if (!state.running) {
         const topicName = window.prompt("New VCP topic name", "");
         if (topicName === null) return;
+        setStatusLabel("Creating VCP topic...", "running");
         savePrefs();
         vscode.postMessage({
           type: "createVcpTopic",
@@ -1616,10 +1811,11 @@ function buildWebviewHtml(nonce) {
         vscode.postMessage({ type: "switchSession", payload: { sessionId: el.sessionSelect.value } });
       }
     });
-    el.doctor.addEventListener("click", () => { if (!state.running) { setRunning(true); vscode.postMessage({ type: "runDoctor" }); } });
-    el.status.addEventListener("click", () => { if (!state.running) { setRunning(true); vscode.postMessage({ type: "runStatus" }); } });
+    el.doctor.addEventListener("click", () => { if (!state.running) { setStatusLabel("Running doctor...", "running"); setRunning(true); vscode.postMessage({ type: "runDoctor" }); } });
+    el.status.addEventListener("click", () => { if (!state.running) { setStatusLabel("Running status...", "running"); setRunning(true); vscode.postMessage({ type: "runStatus" }); } });
     el.repl.addEventListener("click", () => {
       savePrefs();
+      setStatusLabel("Opening REPL...", "running");
       vscode.postMessage({
       type: "openRepl",
       payload: {
@@ -1662,6 +1858,8 @@ function buildWebviewHtml(nonce) {
         el.modelSlot.value = payload.modelSlot || "auto";
         el.model.value = payload.model || "";
         applyModelMappings(payload.modelMappings);
+        el.showAdvancedModelSettings.checked = Boolean(payload.showAdvancedModelSettings);
+        state.showAdvancedModelSettings = Boolean(payload.showAdvancedModelSettings);
         el.maxTokens.value = payload.maxTokens || 1024;
         el.includeEditor.checked = Boolean(payload.includeEditorContext);
         el.connectionMode.value = payload.connectionMode || "cc-switch";
@@ -1675,6 +1873,8 @@ function buildWebviewHtml(nonce) {
         if (state.messages.length === 0) addMessage("system", "Ready. Choose CC switch, Direct API, or VCP Agent Memory above, then start chatting.");
         updateConnectionUi();
         updateModelUi();
+        updateAdvancedModelUi();
+        setStatusLabel("Ready", "idle");
         setRunning(false);
         return;
       }
@@ -1683,6 +1883,10 @@ function buildWebviewHtml(nonce) {
         if (payload.modelSlot) el.modelSlot.value = payload.modelSlot;
         if (typeof payload.model === "string") el.model.value = payload.model;
         if (payload.modelMappings) applyModelMappings(payload.modelMappings);
+        if (Object.prototype.hasOwnProperty.call(payload, "showAdvancedModelSettings")) {
+          el.showAdvancedModelSettings.checked = Boolean(payload.showAdvancedModelSettings);
+          state.showAdvancedModelSettings = Boolean(payload.showAdvancedModelSettings);
+        }
         if (payload.connectionMode) el.connectionMode.value = payload.connectionMode;
         if (payload.provider) el.provider.value = payload.provider;
         if (typeof payload.baseUrl === "string") el.baseUrl.value = payload.baseUrl;
@@ -1693,12 +1897,15 @@ function buildWebviewHtml(nonce) {
         el.apiKey.value = "";
         updateConnectionUi();
         updateModelUi();
+        updateAdvancedModelUi();
+        setStatusLabel("Prefs saved", "idle");
         return;
       }
       if (msg.type === "vcpState") {
         state.vcpState = payload || { available: false, agents: [], topics: [], history: [] };
         renderVcpOptions();
         updateConnectionUi();
+        setStatusLabel("VCP refreshed", "idle");
         return;
       }
       if (msg.type === "vcpHistoryLoaded") {
@@ -1735,6 +1942,7 @@ function buildWebviewHtml(nonce) {
           schedulePersist();
         }
         state.assistantMessageIndex = -1;
+        setStatusLabel("Idle", "idle");
         return;
       }
       if (msg.type === "runCancelled") {
@@ -1748,6 +1956,7 @@ function buildWebviewHtml(nonce) {
         }
         addMessage("system", payload.message || "Cancelled.");
         state.assistantMessageIndex = -1;
+        setStatusLabel("Idle", "idle");
         return;
       }
       if (msg.type === "utilityResult") {
@@ -1756,6 +1965,7 @@ function buildWebviewHtml(nonce) {
         if (payload.stdout) lines.push(payload.stdout.trim());
         if (payload.stderr) lines.push(payload.stderr.trim());
         addMessage("system", lines.join("\\n\\n") || (payload.command + " done."));
+        setStatusLabel("Idle", "idle");
         return;
       }
       if (msg.type === "fileViewed") {
@@ -1775,11 +1985,13 @@ function buildWebviewHtml(nonce) {
             note.trim()
           ].filter(Boolean).join("\\n")
         );
+        setStatusLabel("Idle", "idle");
         return;
       }
       if (msg.type === "error") {
         setRunning(false);
         addMessage("system", payload.message || "Unexpected error.");
+        setStatusLabel("Error", "error");
         return;
       }
       if (msg.type === "invoke") {
@@ -1797,13 +2009,15 @@ function buildWebviewHtml(nonce) {
     });
 
     window.addEventListener("beforeunload", persistNow);
+    window.__clawMainReady = true;
+    reportBoot("main-ready");
     vscode.postMessage({ type: "init" });
     setRunning(false);
 
     function renderMessageHtml(message) {
       const content = String((message && message.content) || "");
-      if (message.role === "assistant" || message.role === "system") return "<div class=\\"md\\">" + renderMarkdown(content) + "</div>";
-      return "<div class=\\"plain\\">" + escapeHtml(content).replace(/\\n/g, "<br />") + "</div>";
+      if (message.role === "assistant" || message.role === "system") return '<div class="md">' + renderMarkdown(content) + "</div>";
+      return '<div class="plain">' + escapeHtml(content).replace(/\n/g, "<br />") + "</div>";
     }
 
     function renderMarkdown(text) {
@@ -1833,7 +2047,7 @@ function buildWebviewHtml(nonce) {
         const lang = escapeHtml(langRaw || "code");
         const codeRaw = source.slice(lineEnd + 1, end);
         const code = highlightCode(codeRaw, langRaw);
-        parts.push("<div class=\\"code\\"><div class=\\"code-head\\"><span>" + lang + "</span><button class=\\"copy-btn\\">Copy</button></div><pre><code>" + code + "</code></pre></div>");
+        parts.push('<div class="code"><div class="code-head"><span>' + lang + '</span><button class="copy-btn">Copy</button></div><pre><code>' + code + "</code></pre></div>");
         i = end + fence.length;
       }
       return parts.join("") || "<p></p>";
@@ -1890,7 +2104,7 @@ function buildWebviewHtml(nonce) {
           break;
         }
         out += escapeHtml(source.slice(0, start));
-        out += "<code class=\\"inline\\">" + escapeHtml(source.slice(start + 1, end)) + "</code>";
+        out += '<code class="inline">' + escapeHtml(source.slice(start + 1, end)) + "</code>";
         source = source.slice(end + 1);
       }
       return out;
@@ -1902,25 +2116,25 @@ function buildWebviewHtml(nonce) {
       const frozen = [];
       const freeze = (regex, cls) => {
         text = text.replace(regex, (s) => {
-          const idx = frozen.push("<span class=\\"" + cls + "\\">" + s + "</span>") - 1;
+          const idx = frozen.push('<span class="' + cls + '">' + s + "</span>") - 1;
           return "@@HL" + idx + "@@";
         });
       };
       freeze(/"(?:[^"\\n\\\\]|\\\\.)*"|'(?:[^'\\n\\\\]|\\\\.)*'/g, "tok-str");
       if (lang === "js" || lang === "ts" || lang === "rust" || lang === "c" || lang === "cpp") {
-        freeze(/\\/\\*[\\s\\S]*?\\*\\//g, "tok-com");
-        freeze(/\\/\\/[^\\n]*/g, "tok-com");
+        freeze(/\/\*[\s\S]*?\*\//g, "tok-com");
+        freeze(/\/\/[^\n]*/g, "tok-com");
       } else if (lang === "py" || lang === "sh") {
         freeze(/#[^\\n]*/g, "tok-com");
       }
-      text = text.replace(/\\b\\d+(?:\\.\\d+)?\\b/g, "<span class=\\"tok-num\\">$&</span>");
+      text = text.replace(/\b\d+(?:\.\d+)?\b/g, '<span class="tok-num">$&</span>');
       const kw = getKeywords(lang);
       if (kw.length) {
-        text = text.replace(new RegExp("\\\\b(" + kw.join("|") + ")\\\\b", "g"), "<span class=\\"tok-kw\\">$1</span>");
+        text = text.replace(new RegExp("\\b(" + kw.join("|") + ")\\b", "g"), '<span class="tok-kw">$1</span>');
       }
       const bi = getBuiltins(lang);
       if (bi.length) {
-        text = text.replace(new RegExp("\\\\b(" + bi.join("|") + ")\\\\b", "g"), "<span class=\\"tok-bi\\">$1</span>");
+        text = text.replace(new RegExp("\\b(" + bi.join("|") + ")\\b", "g"), '<span class="tok-bi">$1</span>');
       }
       text = text.replace(/@@HL(\\d+)@@/g, (_, n) => frozen[Number(n)] || "");
       return text;
@@ -2198,6 +2412,32 @@ function getVcpEnvironment(workspaceRoot) {
     agentsDir: path.join(appDataRoot, "Agents"),
     userDataDir: path.join(appDataRoot, "UserData")
   };
+}
+
+function findVcpChatRoot(basePath) {
+  if (!basePath) {
+    return null;
+  }
+
+  let current = path.resolve(basePath);
+  for (let depth = 0; depth < 8; depth += 1) {
+    const direct = path.join(current, "VCPChat");
+    if (pathExists(path.join(direct, "AppData", "settings.json"))) {
+      return direct;
+    }
+
+    if (path.basename(current).toLowerCase() === "vcpchat" && pathExists(path.join(current, "AppData", "settings.json"))) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return null;
 }
 
 function loadVcpSidebarState(env, prefs = {}) {
@@ -2697,6 +2937,23 @@ function withHomeEnv(baseEnv) {
   return env;
 }
 
+function createNonce() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let nonce = "";
+  for (let i = 0; i < 32; i += 1) {
+    nonce += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return nonce;
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    return String(value);
+  }
+}
+
 function resolveCargoCommand(workspaceRoot) {
   const parent = path.dirname(workspaceRoot);
   const candidates = [
@@ -2750,26 +3007,38 @@ function getFileLanguage(filePath) {
 
 function findClawCodeRoot(basePath) {
   const fs = require("fs");
-  const candidates = [basePath, path.join(basePath, "claw-code")];
-  for (const candidate of candidates) {
-    if (pathExists(path.join(candidate, "rust", "run-with-cc-switch.ps1"))) {
-      return candidate;
-    }
-  }
+  let current = path.resolve(basePath);
+  for (let depth = 0; depth < 8; depth += 1) {
+    const direct = current;
+    const child = path.join(current, "claw-code");
 
-  try {
-    const entries = fs.readdirSync(basePath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const candidate = path.join(basePath, entry.name);
-      if (pathExists(path.join(candidate, "rust", "run-with-cc-switch.ps1"))) {
-        return candidate;
-      }
+    if (pathExists(path.join(direct, "rust", "run-with-cc-switch.ps1"))) {
+      return direct;
     }
-  } catch (_) {
-    // best effort only
+    if (pathExists(path.join(child, "rust", "run-with-cc-switch.ps1"))) {
+      return child;
+    }
+
+    try {
+      const entries = fs.readdirSync(current, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const candidate = path.join(current, entry.name);
+        if (pathExists(path.join(candidate, "rust", "run-with-cc-switch.ps1"))) {
+          return candidate;
+        }
+      }
+    } catch (_) {
+      // best effort only
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
   }
 
   return null;
