@@ -1,0 +1,149 @@
+{
+  "name": "claw-sidebar",
+  "displayName": "Claw Sidebar",
+  "description": "Claude Code-style VS Code sidebar for local Claw + CC switch workflows.",
+  "version": "0.1.1",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ultraworkers/claw-code.git"
+  },
+  "files": [
+    "extension.js",
+    "package.json",
+    "README.md",
+    "LICENSE",
+    "media/claw.svg"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claw",
+    "claude",
+    "chat",
+    "sidebar",
+    "cc-switch"
+  ],
+  "activationEvents": [
+    "onView:clawSidebar.view",
+    "onCommand:clawSidebar.focus",
+    "onCommand:clawSidebar.newChat",
+    "onCommand:clawSidebar.stop",
+    "onCommand:clawSidebar.doctor",
+    "onCommand:clawSidebar.status",
+    "onCommand:clawSidebar.repl",
+    "onCommand:clawSidebar.viewFile",
+    "onCommand:clawSidebar.askSelection",
+    "onCommand:clawSidebar.quickStart"
+  ],
+  "main": "extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "clawSidebar",
+          "title": "Claw",
+          "icon": "media/claw.svg"
+        }
+      ]
+    },
+    "views": {
+      "clawSidebar": [
+        {
+          "type": "webview",
+          "id": "clawSidebar.view",
+          "name": "Claw Sidebar"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "clawSidebar.focus",
+        "title": "Claw Sidebar: Focus"
+      },
+      {
+        "command": "clawSidebar.newChat",
+        "title": "Claw Sidebar: New Chat"
+      },
+      {
+        "command": "clawSidebar.stop",
+        "title": "Claw Sidebar: Stop Request"
+      },
+      {
+        "command": "clawSidebar.doctor",
+        "title": "Claw Sidebar: Run Doctor"
+      },
+      {
+        "command": "clawSidebar.status",
+        "title": "Claw Sidebar: Run Status"
+      },
+      {
+        "command": "clawSidebar.repl",
+        "title": "Claw Sidebar: Open REPL"
+      },
+      {
+        "command": "clawSidebar.viewFile",
+        "title": "Claw Sidebar: View File"
+      },
+      {
+        "command": "clawSidebar.askSelection",
+        "title": "Claw Sidebar: Ask Selection"
+      },
+      {
+        "command": "clawSidebar.quickStart",
+        "title": "Claw Sidebar: Quick Start"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "clawSidebar.quickStart",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@0"
+        },
+        {
+          "command": "clawSidebar.newChat",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "clawSidebar.stop",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@2"
+        },
+        {
+          "command": "clawSidebar.doctor",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@3"
+        },
+        {
+          "command": "clawSidebar.status",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@4"
+        },
+        {
+          "command": "clawSidebar.repl",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@5"
+        },
+        {
+          "command": "clawSidebar.viewFile",
+          "when": "view == clawSidebar.view",
+          "group": "navigation@6"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "clawSidebar.askSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@20"
+        }
+      ]
+    }
+  }
+}

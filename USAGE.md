@@ -121,6 +121,11 @@ cd rust
 ./target/debug/claw system-prompt --cwd .. --date 2026-04-04
 ```
 
+When sandboxing is enabled but cannot be activated for the requested settings
+(for example namespace isolation on a host without `unshare`), bash tool
+execution now fails closed with `PermissionDenied` unless you explicitly set
+`dangerouslyDisableSandbox=true` on that tool call.
+
 ## Session management
 
 REPL turns are persisted under `.claw/sessions/` in the current workspace.

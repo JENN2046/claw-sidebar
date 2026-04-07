@@ -70,6 +70,7 @@ pub struct BashCommandOutput {
 pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
+    enforce_sandbox_or_explicit_bypass(&input, &sandbox_status)?;
 
     if input.run_in_background.unwrap_or(false) {
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
@@ -100,6 +101,30 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
 
     let runtime = Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(execute_bash_async(input, sandbox_status, cwd))
+}
+
+fn enforce_sandbox_or_explicit_bypass(
+    input: &BashCommandInput,
+    sandbox_status: &SandboxStatus,
+) -> io::Result<()> {
+    if input.dangerously_disable_sandbox.unwrap_or(false) {
+        return Ok(());
+    }
+
+    if sandbox_status.enabled && !sandbox_status.active {
+        let detail = sandbox_status.fallback_reason.as_deref().unwrap_or(
+            "sandbox protections are unavailable on this host for the requested settings",
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Refusing to execute command without active sandbox protections: {detail}. \
+Set dangerouslyDisableSandbox=true to bypass this safety check."
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 async fn execute_bash_async(
@@ -200,8 +225,18 @@ fn prepare_command(
         return prepared;
     }
 
-    let mut prepared = Command::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
+    #[cfg(windows)]
+    let mut prepared = {
+        let mut prepared = Command::new("cmd");
+        prepared.arg("/C").arg(command).current_dir(cwd);
+        prepared
+    };
+    #[cfg(not(windows))]
+    let mut prepared = {
+        let mut prepared = Command::new("sh");
+        prepared.arg("-lc").arg(command).current_dir(cwd);
+        prepared
+    };
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
@@ -227,8 +262,18 @@ fn prepare_tokio_command(
         return prepared;
     }
 
-    let mut prepared = TokioCommand::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
+    #[cfg(windows)]
+    let mut prepared = {
+        let mut prepared = TokioCommand::new("cmd");
+        prepared.arg("/C").arg(command).current_dir(cwd);
+        prepared
+    };
+    #[cfg(not(windows))]
+    let mut prepared = {
+        let mut prepared = TokioCommand::new("sh");
+        prepared.arg("-lc").arg(command).current_dir(cwd);
+        prepared
+    };
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
@@ -243,13 +288,24 @@ fn prepare_sandbox_dirs(cwd: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_bash, BashCommandInput};
-    use crate::sandbox::FilesystemIsolationMode;
+    use super::{enforce_sandbox_or_explicit_bypass, execute_bash, BashCommandInput};
+    use crate::sandbox::{FilesystemIsolationMode, SandboxRequest, SandboxStatus};
+
+    fn print_hello_command() -> String {
+        #[cfg(windows)]
+        {
+            "echo hello".to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            "printf 'hello'".to_string()
+        }
+    }
 
     #[test]
     fn executes_simple_command() {
         let output = execute_bash(BashCommandInput {
-            command: String::from("printf 'hello'"),
+            command: print_hello_command(),
             timeout: Some(1_000),
             description: None,
             run_in_background: Some(false),
@@ -261,7 +317,7 @@ mod tests {
         })
         .expect("bash command should execute");
 
-        assert_eq!(output.stdout, "hello");
+        assert_eq!(output.stdout.trim(), "hello");
         assert!(!output.interrupted);
         assert!(output.sandbox_status.is_some());
     }
@@ -269,7 +325,7 @@ mod tests {
     #[test]
     fn disables_sandbox_when_requested() {
         let output = execute_bash(BashCommandInput {
-            command: String::from("printf 'hello'"),
+            command: print_hello_command(),
             timeout: Some(1_000),
             description: None,
             run_in_background: Some(false),
@@ -282,6 +338,69 @@ mod tests {
         .expect("bash command should execute");
 
         assert!(!output.sandbox_status.expect("sandbox status").enabled);
+    }
+
+    #[test]
+    fn rejects_when_sandbox_is_enabled_but_inactive() {
+        let status = SandboxStatus {
+            enabled: true,
+            active: false,
+            fallback_reason: Some("namespace isolation unavailable".to_string()),
+            requested: SandboxRequest {
+                enabled: true,
+                namespace_restrictions: true,
+                network_isolation: false,
+                filesystem_mode: FilesystemIsolationMode::WorkspaceOnly,
+                allowed_mounts: Vec::new(),
+            },
+            ..SandboxStatus::default()
+        };
+        let input = BashCommandInput {
+            command: String::from("printf 'hello'"),
+            timeout: Some(1_000),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: None,
+            isolate_network: None,
+            filesystem_mode: None,
+            allowed_mounts: None,
+        };
+
+        let error = enforce_sandbox_or_explicit_bypass(&input, &status)
+            .expect_err("inactive sandbox should reject command");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn allows_explicit_sandbox_bypass() {
+        let status = SandboxStatus {
+            enabled: true,
+            active: false,
+            fallback_reason: Some("namespace isolation unavailable".to_string()),
+            requested: SandboxRequest {
+                enabled: true,
+                namespace_restrictions: true,
+                network_isolation: false,
+                filesystem_mode: FilesystemIsolationMode::WorkspaceOnly,
+                allowed_mounts: Vec::new(),
+            },
+            ..SandboxStatus::default()
+        };
+        let input = BashCommandInput {
+            command: String::from("printf 'hello'"),
+            timeout: Some(1_000),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(true),
+            namespace_restrictions: None,
+            isolate_network: None,
+            filesystem_mode: None,
+            allowed_mounts: None,
+        };
+
+        enforce_sandbox_or_explicit_bypass(&input, &status)
+            .expect("explicit bypass should allow execution");
     }
 }
 

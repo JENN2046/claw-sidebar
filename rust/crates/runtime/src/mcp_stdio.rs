@@ -1405,15 +1405,16 @@ fn default_initialize_params() -> McpInitializeParams {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::ErrorKind;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use serde_json::json;
     use tokio::runtime::Builder;
@@ -1443,6 +1444,19 @@ mod tests {
         std::env::temp_dir().join(format!("runtime-mcp-stdio-{nanos}-{unique_id}"))
     }
 
+    fn set_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("chmod");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+    }
+
     fn write_echo_script() -> PathBuf {
         let root = temp_dir();
         fs::create_dir_all(&root).expect("temp dir");
@@ -1452,9 +1466,7 @@ mod tests {
             "#!/bin/sh\nprintf 'READY:%s\\n' \"$MCP_TEST_TOKEN\"\nIFS= read -r line\nprintf 'ECHO:%s\\n' \"$line\"\n",
         )
         .expect("write script");
-        let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod");
+        set_executable(&script_path);
         script_path
     }
 
@@ -1498,9 +1510,7 @@ mod tests {
         ]
         .join("\n");
         fs::write(&script_path, script).expect("write script");
-        let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod");
+        set_executable(&script_path);
         script_path
     }
 
@@ -1632,9 +1642,7 @@ mod tests {
         ]
         .join("\n");
         fs::write(&script_path, script).expect("write script");
-        let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod");
+        set_executable(&script_path);
         script_path
     }
 
@@ -1757,9 +1765,7 @@ mod tests {
         ]
         .join("\n");
         fs::write(&script_path, script).expect("write script");
-        let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod");
+        set_executable(&script_path);
         script_path
     }
 
@@ -1842,6 +1848,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn spawns_stdio_process_and_round_trips_io() {
         let runtime = Builder::new_current_thread()
@@ -2044,6 +2051,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn direct_spawn_uses_transport_env() {
         let runtime = Builder::new_current_thread()
@@ -2477,6 +2485,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn given_initialize_hangs_once_when_discover_tools_then_manager_retries_and_succeeds() {
         let runtime = Builder::new_current_thread()
@@ -2676,12 +2685,11 @@ mod tests {
         ]
         .join("\n");
         fs::write(&script_path, script).expect("write script");
-        let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).expect("chmod");
+        set_executable(&script_path);
         script_path
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn manager_discovery_report_keeps_healthy_servers_when_one_server_fails() {
         let runtime = Builder::new_current_thread()

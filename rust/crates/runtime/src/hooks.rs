@@ -537,7 +537,7 @@ fn parse_hook_output(stdout: &str) -> ParsedHookOutput {
         return ParsedHookOutput::default();
     }
 
-    let Ok(Value::Object(root)) = serde_json::from_str::<Value>(stdout) else {
+    let Some(root) = parse_hook_output_object(stdout) else {
         return ParsedHookOutput {
             messages: vec![stdout.to_string()],
             ..ParsedHookOutput::default()
@@ -588,6 +588,28 @@ fn parse_hook_output(stdout: &str) -> ParsedHookOutput {
     parsed
 }
 
+fn parse_hook_output_object(stdout: &str) -> Option<serde_json::Map<String, Value>> {
+    if let Ok(Value::Object(root)) = serde_json::from_str::<Value>(stdout) {
+        return Some(root);
+    }
+
+    // Some Windows shells emit escaped JSON payloads (for example with `\"` and `^"`).
+    // Normalize common escaping patterns and retry parsing before treating output as plain text.
+    let normalized = stdout
+        .replace('^', "")
+        .replace("\\\"", "\"")
+        .replace("\"\"", "\"");
+
+    if normalized == stdout {
+        return None;
+    }
+
+    match serde_json::from_str::<Value>(&normalized) {
+        Ok(Value::Object(root)) => Some(root),
+        _ => None,
+    }
+}
+
 fn hook_payload(
     event: HookEvent,
     tool_name: &str,
@@ -633,7 +655,7 @@ fn format_hook_failure(command: &str, code: i32, stdout: Option<&str>, stderr: &
 
 fn shell_command(command: &str) -> CommandWithStdin {
     #[cfg(windows)]
-    let mut command_builder = {
+    let command_builder = {
         let mut command_builder = Command::new("cmd");
         command_builder.arg("/C").arg(command);
         CommandWithStdin::new(command_builder)
@@ -719,7 +741,7 @@ mod tests {
 
     use super::{
         HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult,
-        HookRunner,
+        HookRunner, parse_hook_output,
     };
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
     use crate::permissions::PermissionOverride;
@@ -734,10 +756,54 @@ mod tests {
         }
     }
 
+    fn hook_print(text: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!("echo {text}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("printf '{text}'")
+        }
+    }
+
+    fn hook_print_and_exit(text: &str, code: i32) -> String {
+        #[cfg(windows)]
+        {
+            format!("echo {text} & exit /b {code}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("printf '{text}'; exit {code}")
+        }
+    }
+
+    fn hook_sleep(seconds: u64) -> String {
+        #[cfg(windows)]
+        {
+            format!("powershell -NoProfile -Command \"Start-Sleep -Seconds {seconds}\"")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {seconds}")
+        }
+    }
+
+    fn hook_override_payload() -> String {
+        #[cfg(windows)]
+        {
+            "echo {^\"systemMessage^\":^\"updated^\",^\"hookSpecificOutput^\":{^\"permissionDecision^\":^\"allow^\",^\"permissionDecisionReason^\":^\"hook ok^\",^\"updatedInput^\":{^\"command^\":^\"git status^\"}}}".to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            "printf '%s' '{\"systemMessage\":\"updated\",\"hookSpecificOutput\":{\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"hook ok\",\"updatedInput\":{\"command\":\"git status\"}}}'".to_string()
+        }
+    }
+
     #[test]
     fn allows_exit_code_zero_and_captures_stdout() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
-            vec![shell_snippet("printf 'pre ok'")],
+            vec![shell_snippet(&hook_print("pre ok"))],
             Vec::new(),
             Vec::new(),
         ));
@@ -750,7 +816,7 @@ mod tests {
     #[test]
     fn denies_exit_code_two() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
-            vec![shell_snippet("printf 'blocked by hook'; exit 2")],
+            vec![shell_snippet(&hook_print_and_exit("blocked by hook", 2))],
             Vec::new(),
             Vec::new(),
         ));
@@ -765,7 +831,7 @@ mod tests {
     fn propagates_other_non_zero_statuses_as_failures() {
         let runner = HookRunner::from_feature_config(&RuntimeFeatureConfig::default().with_hooks(
             RuntimeHookConfig::new(
-                vec![shell_snippet("printf 'warning hook'; exit 1")],
+                vec![shell_snippet(&hook_print_and_exit("warning hook", 1))],
                 Vec::new(),
                 Vec::new(),
             ),
@@ -786,9 +852,7 @@ mod tests {
     #[test]
     fn parses_pre_hook_permission_override_and_updated_input() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
-            vec![shell_snippet(
-                r#"printf '%s' '{"systemMessage":"updated","hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":"hook ok","updatedInput":{"command":"git status"}}}'"#,
-            )],
+            vec![shell_snippet(&hook_override_payload())],
             Vec::new(),
             Vec::new(),
         ));
@@ -805,12 +869,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_escaped_json_payload_output() {
+        let stdout = r#"{\"systemMessage\":\"updated\",\"hookSpecificOutput\":{\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"hook ok\",\"updatedInput\":{\"command\":\"git status\"}}}"#;
+        let parsed = parse_hook_output(stdout);
+
+        assert_eq!(parsed.permission_override, Some(PermissionOverride::Allow));
+        assert_eq!(parsed.permission_reason.as_deref(), Some("hook ok"));
+        assert_eq!(parsed.updated_input.as_deref(), Some(r#"{"command":"git status"}"#));
+        assert!(parsed.messages.iter().any(|message| message == "updated"));
+    }
+
+    #[test]
     fn runs_post_tool_use_failure_hooks() {
         // given
         let runner = HookRunner::new(RuntimeHookConfig::new(
             Vec::new(),
             Vec::new(),
-            vec![shell_snippet("printf 'failure hook ran'")],
+            vec![shell_snippet(&hook_print("failure hook ran"))],
         ));
 
         // when
@@ -829,8 +904,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![
-                shell_snippet("printf 'broken failure hook'; exit 1"),
-                shell_snippet("printf 'later failure hook'"),
+                shell_snippet(&hook_print_and_exit("broken failure hook", 1)),
+                shell_snippet(&hook_print("later failure hook")),
             ],
         ));
 
@@ -853,11 +928,10 @@ mod tests {
     #[test]
     fn executes_hooks_in_configured_order() {
         // given
+        let first = shell_snippet(&hook_print("first"));
+        let second = shell_snippet(&hook_print("second"));
         let runner = HookRunner::new(RuntimeHookConfig::new(
-            vec![
-                shell_snippet("printf 'first'"),
-                shell_snippet("printf 'second'"),
-            ],
+            vec![first.clone(), second.clone()],
             Vec::new(),
             Vec::new(),
         ));
@@ -883,7 +957,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'first'"
+            } if command == &first
         ));
         assert!(matches!(
             &reporter.events[1],
@@ -891,7 +965,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'first'"
+            } if command == &first
         ));
         assert!(matches!(
             &reporter.events[2],
@@ -899,7 +973,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'second'"
+            } if command == &second
         ));
         assert!(matches!(
             &reporter.events[3],
@@ -907,7 +981,7 @@ mod tests {
                 event: HookEvent::PreToolUse,
                 command,
                 ..
-            } if command == "printf 'second'"
+            } if command == &second
         ));
     }
 
@@ -916,8 +990,8 @@ mod tests {
         // given
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![
-                shell_snippet("printf 'broken'; exit 1"),
-                shell_snippet("printf 'later'"),
+                shell_snippet(&hook_print_and_exit("broken", 1)),
+                shell_snippet(&hook_print("later")),
             ],
             Vec::new(),
             Vec::new(),
@@ -937,8 +1011,9 @@ mod tests {
 
     #[test]
     fn abort_signal_cancels_long_running_hook_and_reports_progress() {
+        let sleep_hook = shell_snippet(&hook_sleep(5));
         let runner = HookRunner::new(RuntimeHookConfig::new(
-            vec![shell_snippet("sleep 5")],
+            vec![sleep_hook],
             Vec::new(),
             Vec::new(),
         ));
@@ -977,7 +1052,7 @@ mod tests {
 
     #[cfg(windows)]
     fn shell_snippet(script: &str) -> String {
-        script.replace('\'', "\"")
+        script.to_string()
     }
 
     #[cfg(not(windows))]

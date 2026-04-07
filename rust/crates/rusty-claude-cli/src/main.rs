@@ -57,6 +57,13 @@ use tools::{GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
+    if let Ok(override_value) = env::var("CLAW_MAX_OUTPUT_TOKENS") {
+        if let Ok(parsed) = override_value.trim().parse::<u32>() {
+            if parsed > 0 {
+                return parsed;
+            }
+        }
+    }
     if model.contains("opus") {
         32_000
     } else {
@@ -4998,6 +5005,14 @@ fn resolve_export_path(
 }
 
 fn build_system_prompt() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if env::var("CLAW_MINIMAL_SYSTEM_PROMPT")
+        .ok()
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
     Ok(load_system_prompt(
         env::current_dir()?,
         DEFAULT_DATE,

@@ -1180,8 +1180,8 @@ mod tests {
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
             &RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
-                vec![shell_snippet("printf 'pre hook ran'")],
-                vec![shell_snippet("printf 'post hook ran'")],
+                vec![shell_snippet(&hook_print("pre hook ran"))],
+                vec![shell_snippet(&hook_print("post hook ran"))],
                 Vec::new(),
             )),
         );
@@ -1258,8 +1258,8 @@ mod tests {
             vec!["system".to_string()],
             &RuntimeFeatureConfig::default().with_hooks(RuntimeHookConfig::new(
                 Vec::new(),
-                vec![shell_snippet("printf 'post hook should not run'")],
-                vec![shell_snippet("printf 'failure hook ran'")],
+                vec![shell_snippet(&hook_print("post hook should not run"))],
+                vec![shell_snippet(&hook_print("failure hook ran"))],
             )),
         );
 
@@ -1461,6 +1461,17 @@ mod tests {
     #[cfg(not(windows))]
     fn shell_snippet(script: &str) -> String {
         script.to_string()
+    }
+
+    fn hook_print(text: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!("echo {text}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("printf '{text}'")
+        }
     }
 
     #[test]
