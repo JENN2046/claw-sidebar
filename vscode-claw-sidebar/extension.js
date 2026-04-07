@@ -1028,15 +1028,16 @@ function buildWebviewHtml(nonce, cspSource) {
     button.danger { background: #b42318; color: #fff; }
     button:hover { background: var(--btnhover); }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
-  .status-bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: color-mix(in srgb, var(--panel) 60%, transparent); border-bottom: 1px solid var(--border); font-size: 11px; flex-wrap: wrap; }
-  .status-item { display: flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
-  .status-icon { font-size: 12px; }
-  .status-text { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
-  .status-sep { color: var(--muted); font-size: 10px; opacity: 0.4; margin: 0 1px; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-  .status-dot.idle { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
-  .status-dot.running { background: #f59e0b; box-shadow: 0 0 4px #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
-  .status-dot.error { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+  .status-bar { display: flex; align-items: center; gap: 4px; padding: 6px 10px; background: color-mix(in srgb, var(--panel) 50%, transparent); border-bottom: 1px solid var(--border); font-size: 11px; flex-wrap: wrap; }
+  .status-item { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 4px; }
+  .status-item:hover { background: color-mix(in srgb, var(--bg) 50%, transparent); }
+  .status-icon { font-size: 11px; opacity: 0.8; }
+  .status-text { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
+  .status-sep { color: var(--muted); font-size: 10px; opacity: 0.3; margin: 0 2px; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .status-dot.idle { background: #22c55e; box-shadow: 0 0 3px #22c55e; }
+  .status-dot.running { background: #f59e0b; box-shadow: 0 0 3px #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
+  .status-dot.error { background: #ef4444; box-shadow: 0 0 3px #ef4444; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
   .collapsible { border-bottom: 1px solid var(--border); }
   .collapsible-header {
