@@ -2,6 +2,7 @@ const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
+const { buildWebviewTemplate } = require("./src/webview/template");
 
 const SESSIONS_KEY = "clawSidebar.sessions";
 const ACTIVE_SESSION_KEY = "clawSidebar.activeSessionId";
@@ -107,9 +108,20 @@ class ClawSidebarProvider {
 
   resolveWebviewView(webviewView) {
     this.view = webviewView;
-    webviewView.webview.options = { enableScripts: true };
+    const webviewRoot = vscode.Uri.joinPath(this.context.extensionUri, "src", "webview");
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [webviewRoot]
+    };
     const nonce = createNonce();
-    webviewView.webview.html = buildWebviewHtml(nonce, webviewView.webview.cspSource);
+    webviewView.webview.html = buildWebviewTemplate({
+      nonce,
+      cspSource: webviewView.webview.cspSource,
+      stylesUri: webviewView.webview.asWebviewUri(vscode.Uri.joinPath(webviewRoot, "styles.css")),
+      stateUri: webviewView.webview.asWebviewUri(vscode.Uri.joinPath(webviewRoot, "webview-state.js")),
+      rendererUri: webviewView.webview.asWebviewUri(vscode.Uri.joinPath(webviewRoot, "message-renderer.js")),
+      mainUri: webviewView.webview.asWebviewUri(vscode.Uri.joinPath(webviewRoot, "main.js"))
+    });
     this.log("Webview resolved and HTML rendered.");
 
     webviewView.onDidDispose(() => {
@@ -198,6 +210,7 @@ class ClawSidebarProvider {
     const prefs = await this.readConnectionPrefs();
     const modelPrefs = this.readModelPrefs();
     const workspaceRoot = getWorkspaceRoot();
+    const workspaceLabel = workspaceRoot ? path.basename(workspaceRoot) : "unknown";
     const vcpState = await this.getVcpState(workspaceRoot, prefs);
     const initialMessages = prefs.connectionMode === "vcp-agent" && Array.isArray(vcpState.history)
       ? vcpState.history
@@ -215,6 +228,7 @@ class ClawSidebarProvider {
       vcpAgentId: prefs.vcpAgentId,
       vcpTopicId: prefs.vcpTopicId,
       vcpState,
+      workspaceLabel,
       sessions: toSessionMetaList(store.sessions),
       activeSessionId: active.id,
       session: initialMessages,
@@ -571,6 +585,7 @@ class ClawSidebarProvider {
     if (!pathExists(scriptPath)) {
       throw new Error(`Missing script: ${scriptPath}`);
     }
+    logs.push("Provider source: CC switch Claude provider");
     logs.push(`Runner: ${scriptPath}`);
 
     const clawExe = path.join(rustDir, "target", "debug", "claw.exe");
@@ -670,17 +685,22 @@ class ClawSidebarProvider {
     const connectionMode = normalizeConnectionMode(
       Object.prototype.hasOwnProperty.call(payload, "connectionMode") ? payload.connectionMode : stored.connectionMode
     );
-    const provider = normalizeProvider(
+    const requestedProvider = normalizeProvider(
       Object.prototype.hasOwnProperty.call(payload, "provider") ? payload.provider : stored.provider
     );
-    const baseUrl = String(
-      Object.prototype.hasOwnProperty.call(payload, "baseUrl") ? payload.baseUrl : stored.baseUrl
-    ).trim();
-    const apiKey = String(
-      Object.prototype.hasOwnProperty.call(payload, "apiKey") && String(payload.apiKey || "").trim()
-        ? payload.apiKey
-        : stored.apiKey
-    ).trim();
+    const provider = connectionMode === "manual" ? requestedProvider : "anthropic";
+    const baseUrl = connectionMode === "manual"
+      ? String(
+          Object.prototype.hasOwnProperty.call(payload, "baseUrl") ? payload.baseUrl : stored.baseUrl
+        ).trim()
+      : "";
+    const apiKey = connectionMode === "manual"
+      ? String(
+          Object.prototype.hasOwnProperty.call(payload, "apiKey") && String(payload.apiKey || "").trim()
+            ? payload.apiKey
+            : stored.apiKey
+        ).trim()
+      : "";
     if (connectionMode !== "cc-switch" && !apiKey) {
       if (connectionMode === "manual") {
         throw new Error("Manual API mode requires an API Key. Enter one in the sidebar first.");
@@ -743,6 +763,7 @@ class ClawSidebarProvider {
     } catch (error) {
       return {
         available: false,
+        configuredRoot: getConfiguredVcpChatRoot(),
         error: error instanceof Error ? error.message : String(error),
         agents: [],
         topics: [],
@@ -795,7 +816,12 @@ class ClawSidebarProvider {
       const assistantText = await executeVcpAgentPrompt({
         state,
         history,
-        signal: controller ? controller.signal : undefined
+        signal: controller ? controller.signal : undefined,
+        onChunk: (text) => {
+          if (!run.cancelled && !run.finished && text) {
+            this.post("runChunk", { text });
+          }
+        }
       });
       if (run.cancelled || run.finished) {
         return;
@@ -804,7 +830,6 @@ class ClawSidebarProvider {
       const assistantMessage = createHistoryEntry("assistant", assistantText);
       history.push(assistantMessage);
       saveVcpHistory(env, state.selectedAgentId, state.selectedTopicId, history);
-      this.post("runChunk", { text: assistantText });
       this.post("runEnd", { code: 0, stdout: assistantText, stderr: "" });
       this.post("vcpState", loadVcpSidebarState(env, connectionPrefs));
     } catch (error) {
@@ -851,13 +876,17 @@ class ClawSidebarProvider {
         model: activeModel,
         maxTokens,
         prompt,
-        signal: controller ? controller.signal : undefined
+        signal: controller ? controller.signal : undefined,
+        onChunk: (chunk) => {
+          if (!run.cancelled && !run.finished && chunk) {
+            this.post("runChunk", { text: chunk });
+          }
+        }
       });
       if (run.cancelled || run.finished) {
         return;
       }
       run.finished = true;
-      this.post("runChunk", { text });
       this.post("runEnd", { code: 0, stdout: text, stderr: "" });
     } catch (error) {
       if (run.cancelled || run.finished) {
@@ -2462,7 +2491,9 @@ function describeConnection(connectionPrefs) {
 function getVcpEnvironment(workspaceRoot) {
   const vcpRoot = findVcpChatRoot(workspaceRoot);
   if (!vcpRoot) {
-    throw new Error("VCPChat was not found next to the current workspace.");
+    throw new Error(
+      "VCPChat was not found. Set the VS Code setting 'clawSidebar.vcpChatRoot' to your VCPChat folder or to a parent VCP folder that contains VCPChat."
+    );
   }
   const appDataRoot = path.join(vcpRoot, "AppData");
   return {
@@ -2474,20 +2505,63 @@ function getVcpEnvironment(workspaceRoot) {
   };
 }
 
+function getConfiguredVcpChatRoot() {
+  const config = vscode.workspace.getConfiguration("clawSidebar");
+  return String(config.get("vcpChatRoot", "") || "").trim();
+}
+
 function findVcpChatRoot(basePath) {
   if (!basePath) {
     return null;
   }
 
+  const seen = new Set();
+  const tryCandidate = (candidate) => {
+    if (!candidate) {
+      return null;
+    }
+    const resolved = path.resolve(candidate);
+    const key = resolved.toLowerCase();
+    if (seen.has(key)) {
+      return null;
+    }
+    seen.add(key);
+    return pathExists(path.join(resolved, "AppData", "settings.json")) ? resolved : null;
+  };
+
+  const configuredRoot = getConfiguredVcpChatRoot();
+  if (configuredRoot) {
+    const configuredCandidates = [configuredRoot, path.join(configuredRoot, "VCPChat")];
+    for (const candidate of configuredCandidates) {
+      const hit = tryCandidate(candidate);
+      if (hit) {
+        return hit;
+      }
+    }
+  }
+
   let current = path.resolve(basePath);
   for (let depth = 0; depth < 8; depth += 1) {
-    const direct = path.join(current, "VCPChat");
-    if (pathExists(path.join(direct, "AppData", "settings.json"))) {
+    const direct = tryCandidate(path.join(current, "VCPChat"));
+    if (direct) {
       return direct;
     }
 
-    if (path.basename(current).toLowerCase() === "vcpchat" && pathExists(path.join(current, "AppData", "settings.json"))) {
-      return current;
+    const self = path.basename(current).toLowerCase() === "vcpchat" ? tryCandidate(current) : null;
+    if (self) {
+      return self;
+    }
+
+    const siblingNames = ["VCP", "vcp", "VCPChat", "vcpchat"];
+    for (const name of siblingNames) {
+      const sibling = tryCandidate(path.join(current, name));
+      if (sibling) {
+        return sibling;
+      }
+      const nested = tryCandidate(path.join(current, name, "VCPChat"));
+      if (nested) {
+        return nested;
+      }
     }
 
     const parent = path.dirname(current);
@@ -2495,6 +2569,19 @@ function findVcpChatRoot(basePath) {
       break;
     }
     current = parent;
+  }
+
+  const parsed = path.parse(path.resolve(basePath));
+  const fallbackCandidates = [
+    path.join(parsed.root, "VCPChat"),
+    path.join(parsed.root, "VCP", "VCPChat"),
+    path.join(parsed.root, "VCP")
+  ];
+  for (const candidate of fallbackCandidates) {
+    const hit = tryCandidate(candidate);
+    if (hit) {
+      return hit;
+    }
   }
 
   return null;
@@ -2518,6 +2605,7 @@ function loadVcpSidebarState(env, prefs = {}) {
   return {
     available: true,
     vcpRoot: env.vcpRoot,
+    configuredRoot: getConfiguredVcpChatRoot(),
     vcpUrl: String(settings.vcpServerUrl || "").trim(),
     hasApiKey: Boolean(String(settings.vcpApiKey || "").trim()),
     selectedAgentId: selectedAgentId || "",
@@ -2669,34 +2757,17 @@ async function executeVcpAgentPrompt(options) {
     body: JSON.stringify({
       messages,
       ...modelConfig,
-      stream: false,
+      stream: true,
       requestId: createHistoryId("vcp")
     }),
     signal
   });
-
-  const raw = await response.text();
-  let payload = null;
-  try {
-    payload = raw ? JSON.parse(raw) : null;
-  } catch (_) {
-    payload = null;
-  }
-  if (!response.ok) {
-    const message =
-      readNestedString(payload, ["message"]) ||
-      readNestedString(payload, ["error", "message"]) ||
-      readNestedString(payload, ["error"]) ||
-      clampText(raw || "", 400) ||
-      `HTTP ${response.status}`;
-    throw new Error(`VCP request failed (${response.status}): ${message}`);
-  }
-
-  const text = extractVcpResponseText(payload);
-  if (!text.trim()) {
-    throw new Error("VCP returned an empty response.");
-  }
-  return text.trim();
+  return executeOpenAiCompatibleStreamingResponse(response, {
+    label: "VCP",
+    emptyMessage: "VCP returned an empty response.",
+    signal,
+    onChunk: options.onChunk
+  });
 }
 
 function buildVcpEndpoint(baseUrl, useToolInjection) {
@@ -2853,24 +2924,238 @@ async function executeDirectApiPrompt(options) {
     body: JSON.stringify(body),
     signal: options.signal
   });
+  if (provider === "anthropic") {
+    return executeAnthropicStreamingResponse(response, {
+      emptyMessage: "The provider returned an empty response.",
+      signal: options.signal,
+      onChunk: options.onChunk
+    });
+  }
+  return executeOpenAiCompatibleStreamingResponse(response, {
+    label: provider === "xai" ? "xAI" : "OpenAI-compatible",
+    emptyMessage: "The provider returned an empty response.",
+    signal: options.signal,
+    onChunk: options.onChunk
+  });
+}
 
-  const raw = await response.text();
+async function executeOpenAiCompatibleStreamingResponse(response, options = {}) {
+  const streamResult = await consumeSseLikeResponse(response, {
+    parseChunk: extractOpenAiCompatibleStreamText,
+    signal: options.signal,
+    onChunk: options.onChunk
+  });
+
+  if (!response.ok) {
+    let payload = null;
+    try {
+      payload = streamResult.raw ? JSON.parse(streamResult.raw) : null;
+    } catch (_) {
+      payload = null;
+    }
+    const message =
+      readNestedString(payload, ["message"]) ||
+      readNestedString(payload, ["error", "message"]) ||
+      readNestedString(payload, ["error"]) ||
+      clampText(streamResult.raw || "", 500) ||
+      `HTTP ${response.status}`;
+    throw new Error(`${options.label || "Request"} request failed (${response.status}): ${message}`);
+  }
+
+  if (streamResult.text.trim()) {
+    return streamResult.text.trim();
+  }
+
   let payload = null;
   try {
-    payload = raw ? JSON.parse(raw) : null;
+    payload = streamResult.raw ? JSON.parse(streamResult.raw) : null;
   } catch (_) {
     payload = null;
   }
+  const fallbackText = extractDirectApiText("openai", payload);
+  if (!fallbackText.trim()) {
+    throw new Error(options.emptyMessage || "The provider returned an empty response.");
+  }
+  if (typeof options.onChunk === "function") {
+    options.onChunk(fallbackText);
+  }
+  return fallbackText.trim();
+}
+
+async function executeAnthropicStreamingResponse(response, options = {}) {
+  const streamResult = await consumeSseLikeResponse(response, {
+    parseChunk: extractAnthropicStreamText,
+    signal: options.signal,
+    onChunk: options.onChunk
+  });
 
   if (!response.ok) {
-    throw new Error(formatDirectApiError(provider, response.status, payload, raw));
+    let payload = null;
+    try {
+      payload = streamResult.raw ? JSON.parse(streamResult.raw) : null;
+    } catch (_) {
+      payload = null;
+    }
+    throw new Error(formatDirectApiError("anthropic", response.status, payload, streamResult.raw));
   }
 
-  const text = extractDirectApiText(provider, payload);
-  if (!text.trim()) {
-    throw new Error("The provider returned an empty response.");
+  if (streamResult.text.trim()) {
+    return streamResult.text.trim();
   }
-  return text.trim();
+
+  let payload = null;
+  try {
+    payload = streamResult.raw ? JSON.parse(streamResult.raw) : null;
+  } catch (_) {
+    payload = null;
+  }
+  const fallbackText = extractDirectApiText("anthropic", payload);
+  if (!fallbackText.trim()) {
+    throw new Error(options.emptyMessage || "The provider returned an empty response.");
+  }
+  if (typeof options.onChunk === "function") {
+    options.onChunk(fallbackText);
+  }
+  return fallbackText.trim();
+}
+
+async function consumeSseLikeResponse(response, options = {}) {
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const raw = await response.text();
+    return { text: "", raw };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = "";
+  let text = "";
+  let buffer = "";
+
+  try {
+    while (true) {
+      if (options.signal && options.signal.aborted) {
+        break;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      const chunkText = decoder.decode(value, { stream: true });
+      raw += chunkText;
+      buffer += chunkText;
+
+      let boundaryIndex = findSseBoundary(buffer);
+      while (boundaryIndex >= 0) {
+        const eventBlock = buffer.slice(0, boundaryIndex);
+        buffer = buffer.slice(boundaryIndex + (buffer[boundaryIndex] === "\r" ? 4 : 2));
+        const parsed = parseSseEventBlock(eventBlock);
+        if (parsed.done) {
+          boundaryIndex = findSseBoundary(buffer);
+          continue;
+        }
+        if (parsed.error) {
+          throw new Error(parsed.error);
+        }
+        if (parsed.payload) {
+          const piece = options.parseChunk ? options.parseChunk(parsed.payload) : "";
+          if (piece) {
+            text += piece;
+            if (typeof options.onChunk === "function") {
+              options.onChunk(piece);
+            }
+          }
+        }
+        boundaryIndex = findSseBoundary(buffer);
+      }
+    }
+
+    const tail = decoder.decode();
+    if (tail) {
+      raw += tail;
+      buffer += tail;
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch (_) {
+      // best effort
+    }
+  }
+
+  return { text, raw: raw.trim() };
+}
+
+function findSseBoundary(buffer) {
+  const crlf = buffer.indexOf("\r\n\r\n");
+  const lf = buffer.indexOf("\n\n");
+  if (crlf < 0) return lf;
+  if (lf < 0) return crlf;
+  return Math.min(crlf, lf);
+}
+
+function parseSseEventBlock(block) {
+  const lines = String(block || "").split(/\r?\n/);
+  const dataLines = [];
+  for (const line of lines) {
+    if (!line || line.startsWith(":")) {
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  const data = dataLines.join("\n").trim();
+  if (!data) {
+    return { payload: null, done: false, error: "" };
+  }
+  if (data === "[DONE]") {
+    return { payload: null, done: true, error: "" };
+  }
+  try {
+    return { payload: JSON.parse(data), done: false, error: "" };
+  } catch (_) {
+    return { payload: null, done: false, error: "" };
+  }
+}
+
+function extractOpenAiCompatibleStreamText(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+  const delta = choice && choice.delta ? choice.delta : null;
+  const content = delta ? delta.content : "";
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+function extractAnthropicStreamText(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  if (payload.type === "content_block_delta" && payload.delta) {
+    if (typeof payload.delta.text === "string") {
+      return payload.delta.text;
+    }
+    if (payload.delta.type === "text_delta" && typeof payload.delta.text === "string") {
+      return payload.delta.text;
+    }
+  }
+  if (payload.type === "content_block_start" && payload.content_block && typeof payload.content_block.text === "string") {
+    return payload.content_block.text;
+  }
+  return "";
 }
 
 function buildDirectApiEndpoint(provider, baseUrl) {
@@ -2892,6 +3177,17 @@ function normalizeEndpoint(baseOrEndpoint, suffix) {
   const lowered = trimmed.toLowerCase();
   if (lowered.endsWith(suffix.toLowerCase())) {
     return trimmed;
+  }
+  const knownEndpointSuffixes = [
+    "/v1/messages",
+    "/v1/chat/completions",
+    "/v1/chatvcp/completions",
+    "/chat/completions"
+  ];
+  for (const candidate of knownEndpointSuffixes) {
+    if (lowered.endsWith(candidate)) {
+      return `${trimmed.slice(0, trimmed.length - candidate.length)}${suffix}`;
+    }
   }
   if (suffix.startsWith("/v1/") && lowered.endsWith("/v1")) {
     return `${trimmed}${suffix.slice(3)}`;
@@ -2918,14 +3214,15 @@ function buildDirectApiRequestBody(provider, model, maxTokens, prompt) {
     return {
       model,
       max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }]
+      messages: [{ role: "user", content: prompt }],
+      stream: true
     };
   }
   return {
     model,
     max_tokens: maxTokens,
     messages: [{ role: "user", content: prompt }],
-    stream: false
+    stream: true
   };
 }
 

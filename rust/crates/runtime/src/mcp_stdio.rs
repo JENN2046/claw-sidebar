@@ -1410,11 +1410,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::ErrorKind;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     use serde_json::json;
     use tokio::runtime::Builder;

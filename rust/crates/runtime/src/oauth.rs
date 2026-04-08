@@ -335,9 +335,26 @@ fn credentials_home_dir() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAW_CONFIG_HOME") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".claw"))
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".claw"));
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(user_profile).join(".claw"));
+    }
+    if let (Some(home_drive), Some(home_path)) =
+        (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+    {
+        return Ok(PathBuf::from(format!(
+            "{}{}",
+            PathBuf::from(home_drive).display(),
+            PathBuf::from(home_path).display()
+        ))
+        .join(".claw"));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "HOME, USERPROFILE, and HOMEDRIVE/HOMEPATH are not set",
+    ))
 }
 
 fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {
@@ -577,6 +594,20 @@ mod tests {
 
         std::env::remove_var("CLAW_CONFIG_HOME");
         std::fs::remove_dir_all(config_home).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn credentials_path_falls_back_to_userprofile_when_home_is_missing() {
+        let _guard = env_lock();
+        let user_profile = temp_config_home();
+        std::env::remove_var("CLAW_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", &user_profile);
+
+        let path = credentials_path().expect("credentials path");
+        assert_eq!(path, user_profile.join(".claw").join("credentials.json"));
+
+        std::env::remove_var("USERPROFILE");
     }
 
     #[test]

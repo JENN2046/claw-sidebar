@@ -5979,6 +5979,7 @@ mod tests {
         assert!(output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with("/help/SKILL.md"));
         assert!(output["prompt"]
             .as_str()
@@ -5998,6 +5999,7 @@ mod tests {
         assert!(dollar_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with("/help/SKILL.md"));
 
         if let Some(home) = original_home {
@@ -6037,6 +6039,7 @@ mod tests {
         assert!(skill_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with(".claw/skills/plan/SKILL.md"));
 
         let command_result = execute_tool("Skill", &json!({ "skill": "/handoff" }))
@@ -6046,6 +6049,7 @@ mod tests {
         assert!(command_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with(".claw/commands/handoff.md"));
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -6084,6 +6088,7 @@ mod tests {
         assert!(output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with(".claude/skills/trace/SKILL.md"));
         assert_eq!(output["description"], "Project-local trace helper");
 
@@ -6146,11 +6151,13 @@ mod tests {
         assert!(omc_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with(".omc/skills/hud/SKILL.md"));
         assert_eq!(omc_output["description"], "Project-local OMC HUD helper");
         assert!(agents_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with(".agents/skills/trace/SKILL.md"));
         assert_eq!(
             agents_output["description"],
@@ -6206,6 +6213,7 @@ mod tests {
         assert!(output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with("skills/omc-learned/learned/SKILL.md"));
         assert_eq!(output["description"], "Learned OMC skill");
 
@@ -6265,6 +6273,7 @@ mod tests {
         assert!(direct_skill_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with("skills/statusline/SKILL.md"));
         assert_eq!(direct_skill_output["description"], "Claude config skill");
 
@@ -6275,6 +6284,7 @@ mod tests {
         assert!(legacy_command_output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with("commands/doctor-check.md"));
         assert_eq!(
             legacy_command_output["description"],
@@ -6332,6 +6342,7 @@ mod tests {
         assert!(output["path"]
             .as_str()
             .expect("path")
+            .replace('\\', "/")
             .ends_with(".claude/commands/team.md"));
         assert_eq!(output["description"], "Legacy team workflow");
 
@@ -6970,6 +6981,7 @@ mod tests {
         let _ = fs::remove_file(empty_notebook);
     }
 
+    #[cfg(unix)]
     #[test]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
         let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
@@ -7057,6 +7069,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn bash_targeted_tests_skip_branch_preflight() {
         let _guard = env_lock()
@@ -7226,6 +7239,7 @@ mod tests {
         assert!(globbed_output["filenames"][0]
             .as_str()
             .expect("filename")
+            .replace('\\', "/")
             .ends_with("nested/lib.rs"));
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
@@ -7549,6 +7563,7 @@ mod tests {
         assert!(error.contains("must not be empty"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn repl_executes_python_code() {
         let result = execute_tool(
@@ -7578,6 +7593,7 @@ mod tests {
         assert!(error.contains("unsupported REPL language: ruby"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
         let result = execute_tool(
@@ -7593,6 +7609,7 @@ mod tests {
         assert!(error.contains("REPL execution exceeded timeout of 10 ms"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn powershell_runs_via_stub_shell() {
         let _guard = env_lock()
@@ -7756,6 +7773,7 @@ printf 'pwsh:%s' "$1"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn given_no_enforcer_when_bash_then_executes_normally() {
         let _guard = env_lock()

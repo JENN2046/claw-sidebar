@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+#[cfg(not(windows))]
 use std::path::Path;
 use std::process::Command;
 
@@ -345,12 +346,19 @@ impl CommandWithStdin {
 
 #[cfg(test)]
 mod tests {
-    use super::{HookRunResult, HookRunner};
+    #[cfg(unix)]
+    use super::HookRunResult;
+    use super::HookRunner;
+    #[cfg(unix)]
     use crate::{PluginManager, PluginManagerConfig};
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -359,6 +367,7 @@ mod tests {
         std::env::temp_dir().join(format!("plugins-hook-runner-{label}-{nanos}"))
     }
 
+    #[cfg(unix)]
     fn write_hook_plugin(
         root: &Path,
         name: &str,
@@ -392,6 +401,7 @@ mod tests {
         .expect("write plugin manifest");
     }
 
+    #[cfg(unix)]
     #[test]
     fn collects_and_runs_hooks_from_enabled_plugins() {
         // given
@@ -453,6 +463,7 @@ mod tests {
         let _ = fs::remove_dir_all(second_source_root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn pre_tool_use_denies_when_plugin_hook_exits_two() {
         // given

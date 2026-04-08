@@ -14,7 +14,8 @@
     "package.json",
     "README.md",
     "LICENSE",
-    "media/claw.svg"
+    "media/claw.svg",
+    "src/webview/**/*"
   ],
   "engines": {
     "vscode": "^1.85.0"
@@ -66,6 +67,16 @@
           "name": "Claw Sidebar"
         }
       ]
+    },
+    "configuration": {
+      "title": "Claw Sidebar",
+      "properties": {
+        "clawSidebar.vcpChatRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to VCPChat. Set this when VCPChat is not next to the current workspace. You can point to either the VCPChat folder itself or a parent VCP folder that contains VCPChat."
+        }
+      }
     },
     "commands": [
       {

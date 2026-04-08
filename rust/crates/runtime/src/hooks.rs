@@ -740,8 +740,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult,
-        HookRunner, parse_hook_output,
+        parse_hook_output, HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter,
+        HookRunResult, HookRunner,
     };
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
     use crate::permissions::PermissionOverride;
@@ -875,7 +875,10 @@ mod tests {
 
         assert_eq!(parsed.permission_override, Some(PermissionOverride::Allow));
         assert_eq!(parsed.permission_reason.as_deref(), Some("hook ok"));
-        assert_eq!(parsed.updated_input.as_deref(), Some(r#"{"command":"git status"}"#));
+        assert_eq!(
+            parsed.updated_input.as_deref(),
+            Some(r#"{"command":"git status"}"#)
+        );
         assert!(parsed.messages.iter().any(|message| message == "updated"));
     }
 

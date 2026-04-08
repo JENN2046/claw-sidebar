@@ -169,6 +169,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Logout { output_format } => run_logout(output_format)?,
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
+CliAction::Task { task_packet, output_format } => run_task(&task_packet, output_format)?,
         CliAction::Repl {
             model,
             allowed_tools,
@@ -243,6 +244,10 @@ enum CliAction {
         output_format: CliOutputFormat,
     },
     Init {
+        output_format: CliOutputFormat,
+    },
+    Task {
+        task_packet: String,
         output_format: CliOutputFormat,
     },
     Repl {
@@ -457,6 +462,13 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "login" => Ok(CliAction::Login { output_format }),
         "logout" => Ok(CliAction::Logout { output_format }),
         "init" => Ok(CliAction::Init { output_format }),
+"task" => {
+let task_packet = rest[1..].join(" ");
+if task_packet.trim().is_empty() {
+return Err("task subcommand requires a task packet JSON string".to_string());
+}
+Ok(CliAction::Task { task_packet, output_format })
+}
         "prompt" => {
             let prompt = rest[1..].join(" ");
             if prompt.trim().is_empty() {
@@ -4594,6 +4606,43 @@ fn run_init(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+fn run_task(task_packet: &str, output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    // 解析 task_packet JSON
+    let task_json: serde_json::Value = serde_json::from_str(task_packet)
+        .map_err(|e| format!("Failed to parse task packet JSON: {}", e))?;
+
+    // 生成唯一 ID
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let execution_id = format!("exec_{}", now_ms);
+    let session_id = format!("session_{}", now_ms);
+
+    // 输出任务已接收的 JSON 状态
+    let status = json!({
+        "ok": true,
+        "task_id": task_json.get("task_id").and_then(|v| v.as_str()).unwrap_or("unknown"),
+        "execution_id": execution_id,
+        "session_id": session_id,
+        "state": "starting",
+        "summary": "任务已接收，准备执行",
+        "data": {
+            "workspace": task_json.get("workspace").and_then(|v| v.as_str()).unwrap_or(""),
+        },
+        "error": null
+    });
+
+    // 使用 serde_json::to_string 保证输出有效 JSON
+    let json_output = serde_json::to_string(&status)?;
+    println!("{}", json_output);
+
+    // TODO: 实际的任务执行逻辑
+    // 这里应该调用 runtime 来执行具体的 coding 任务
+
+    Ok(())
+}
+
 fn init_json_value(message: &str) -> serde_json::Value {
     json!({
         "kind": "init",
@@ -5007,8 +5056,12 @@ fn resolve_export_path(
 fn build_system_prompt() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     if env::var("CLAW_MINIMAL_SYSTEM_PROMPT")
         .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
     {
         return Ok(Vec::new());
     }
@@ -5848,9 +5901,15 @@ fn format_context_window_blocked_error(session_id: &str, error: &api::ApiError) 
             context_window_tokens,
         } => {
             lines.push(format!("  Model            {model}"));
-            lines.push(format!("  Input estimate   ~{estimated_input_tokens} tokens (heuristic)"));
-            lines.push(format!("  Requested output {requested_output_tokens} tokens"));
-            lines.push(format!("  Total estimate   ~{estimated_total_tokens} tokens (heuristic)"));
+            lines.push(format!(
+                "  Input estimate   ~{estimated_input_tokens} tokens (heuristic)"
+            ));
+            lines.push(format!(
+                "  Requested output {requested_output_tokens} tokens"
+            ));
+            lines.push(format!(
+                "  Total estimate   ~{estimated_total_tokens} tokens (heuristic)"
+            ));
             lines.push(format!("  Context window   {context_window_tokens} tokens"));
         }
         api::ApiError::Api { message, body, .. } => {
@@ -9106,6 +9165,7 @@ UU conflicted.rs",
         let _ = fs::remove_dir_all(source_root);
     }
 
+    #[cfg(unix)]
     #[test]
     #[allow(clippy::too_many_lines)]
     fn build_runtime_plugin_state_discovers_mcp_tools_and_surfaces_pending_servers() {
@@ -9117,21 +9177,19 @@ UU conflicted.rs",
         write_mcp_server_fixture(&script_path);
         fs::write(
             config_home.join("settings.json"),
-            format!(
-                r#"{{
-                  "mcpServers": {{
-                    "alpha": {{
-                      "command": "python3",
-                      "args": ["{}"]
-                    }},
-                    "broken": {{
-                      "command": "python3",
-                      "args": ["-c", "import sys; sys.exit(0)"]
-                    }}
-                  }}
-                }}"#,
-                script_path.to_string_lossy()
-            ),
+            serde_json::json!({
+                "mcpServers": {
+                    "alpha": {
+                        "command": "python3",
+                        "args": [script_path.to_string_lossy().to_string()]
+                    },
+                    "broken": {
+                        "command": "python3",
+                        "args": ["-c", "import sys; sys.exit(0)"]
+                    }
+                }
+            })
+            .to_string(),
         )
         .expect("write mcp settings");
 
@@ -9276,6 +9334,7 @@ UU conflicted.rs",
         let _ = fs::remove_dir_all(workspace);
     }
 
+    #[cfg(unix)]
     #[test]
     fn build_runtime_runs_plugin_lifecycle_init_and_shutdown() {
         let config_home = temp_dir();

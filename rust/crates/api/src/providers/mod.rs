@@ -244,7 +244,7 @@ pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiErro
     Ok(())
 }
 
-fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
+pub(crate) fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
     let mut estimate = estimate_serialized_tokens(&request.messages);
     estimate = estimate.saturating_add(estimate_serialized_tokens(&request.system));
     estimate = estimate.saturating_add(estimate_serialized_tokens(&request.tools));

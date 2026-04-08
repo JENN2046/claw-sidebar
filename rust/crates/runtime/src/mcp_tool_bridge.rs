@@ -314,11 +314,11 @@ impl McpToolRegistry {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use crate::config::{

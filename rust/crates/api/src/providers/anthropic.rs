@@ -14,7 +14,10 @@ use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, Session
 use crate::error::ApiError;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
-use super::{model_token_limit, resolve_model_alias, Provider, ProviderFuture};
+use super::{
+    estimate_message_request_input_tokens, model_token_limit, resolve_model_alias, Provider,
+    ProviderFuture,
+};
 use crate::sse::SseParser;
 use crate::types::{MessageDeltaEvent, MessageRequest, MessageResponse, StreamEvent, Usage};
 
@@ -488,9 +491,20 @@ impl AnthropicClient {
             return Ok(());
         };
 
-        let counted_input_tokens = match self.count_tokens(request).await {
-            Ok(count) => count,
-            Err(_) => return Ok(()),
+        let estimated_input_tokens = estimate_message_request_input_tokens(request);
+        let estimated_total = estimated_input_tokens.saturating_add(request.max_tokens);
+        if estimated_total > limit.context_window_tokens {
+            return Err(ApiError::ContextWindowExceeded {
+                model: resolve_model_alias(&request.model),
+                estimated_input_tokens,
+                requested_output_tokens: request.max_tokens,
+                estimated_total_tokens: estimated_total,
+                context_window_tokens: limit.context_window_tokens,
+            });
+        }
+
+        let Ok(counted_input_tokens) = self.count_tokens(request).await else {
+            return Ok(());
         };
         let estimated_total_tokens = counted_input_tokens.saturating_add(request.max_tokens);
         if estimated_total_tokens > limit.context_window_tokens {
@@ -512,7 +526,10 @@ impl AnthropicClient {
             input_tokens: u32,
         }
 
-        let request_url = format!("{}/v1/messages/count_tokens", self.base_url.trim_end_matches('/'));
+        let request_url = format!(
+            "{}/v1/messages/count_tokens",
+            self.base_url.trim_end_matches('/')
+        );
         let request_body = self.request_profile.render_json_body(request)?;
         let response = self
             .build_request(&request_url)
@@ -968,19 +985,24 @@ mod tests {
     #[test]
     fn read_api_key_requires_presence() {
         let _guard = env_lock();
+        let config_home = temp_config_home();
+        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
         std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("CLAW_CONFIG_HOME");
         let error = super::read_api_key().expect_err("missing key should error");
         assert!(matches!(
             error,
             crate::error::ApiError::MissingCredentials { .. }
         ));
+        std::env::remove_var("CLAW_CONFIG_HOME");
+        cleanup_temp_config_home(&config_home);
     }
 
     #[test]
     fn read_api_key_requires_non_empty_value() {
         let _guard = env_lock();
+        let config_home = temp_config_home();
+        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
         std::env::set_var("ANTHROPIC_AUTH_TOKEN", "");
         std::env::remove_var("ANTHROPIC_API_KEY");
         let error = super::read_api_key().expect_err("empty key should error");
@@ -989,6 +1011,8 @@ mod tests {
             crate::error::ApiError::MissingCredentials { .. }
         ));
         std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        std::env::remove_var("CLAW_CONFIG_HOME");
+        cleanup_temp_config_home(&config_home);
     }
 
     #[test]
